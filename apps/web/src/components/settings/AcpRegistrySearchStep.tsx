@@ -87,8 +87,8 @@ export function useAcpRegistrySearch(environmentId: EnvironmentId, enabled: bool
       setPrepareError(null);
       setInput({ text, submitted: submittedQuery, typedAt: Date.now() });
     },
-    submit: () => {
-      const trimmed = input.text.trim();
+    submit: (query?: string) => {
+      const trimmed = (query ?? input.text).trim();
       setPrepareError(null);
       setInput({ text: trimmed, submitted: trimmed, typedAt: null });
       if (trimmed === submittedQuery) search.refresh();

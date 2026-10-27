@@ -40,6 +40,7 @@ import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
 import { GuestShareIndicator } from "./GuestShareControls";
+import { WorkspaceAreaBreadcrumb } from "../sidebar/WorkspaceAreaBreadcrumb";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -280,6 +281,7 @@ export const ChatHeader = memo(function ChatHeader({
         ariaLabel="Thread breadcrumb"
         className="flex-1 overflow-clip [overflow-clip-margin:2px]"
       >
+        {activeProject ? <WorkspaceAreaBreadcrumb project={activeProject} /> : null}
         {activeProject ? (
           <>
             <WorkspaceBreadcrumbItem className="shrink">

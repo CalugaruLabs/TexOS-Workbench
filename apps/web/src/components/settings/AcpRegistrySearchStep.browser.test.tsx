@@ -1,6 +1,6 @@
 import { EnvironmentId, ProviderDriverKind, type AcpRegistrySearchAgent } from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 
 import { render } from "../../../test/render";
 
@@ -66,30 +66,58 @@ const gemini: AcpRegistrySearchAgent = {
 function Step({
   configured = false,
   onPrepared = vi.fn(),
+  suggestedQuery,
 }: {
   readonly configured?: boolean;
   readonly onPrepared?: (agent: AcpRegistrySearchAgent) => void;
+  readonly suggestedQuery?: string;
 }) {
   const registry = useAcpRegistrySearch(environmentId, true);
   return (
-    <AcpRegistrySearchStep
-      environmentId={environmentId}
-      registry={registry}
-      providerInstances={
-        configured
-          ? {
-              acpRegistry_gemini: {
-                driver: ProviderDriverKind.make("acpRegistry"),
-                config: { agentId: "gemini" },
-              },
-            }
-          : {}
-      }
-      onPrepared={onPrepared}
-      onManualConfiguration={vi.fn()}
-    />
+    <>
+      {suggestedQuery ? (
+        <button type="button" onClick={() => registry.submit(suggestedQuery)}>
+          Search suggestion
+        </button>
+      ) : null}
+      <AcpRegistrySearchStep
+        environmentId={environmentId}
+        registry={registry}
+        providerInstances={
+          configured
+            ? {
+                acpRegistry_gemini: {
+                  driver: ProviderDriverKind.make("acpRegistry"),
+                  config: { agentId: "gemini" },
+                },
+              }
+            : {}
+        }
+        onPrepared={onPrepared}
+        onManualConfiguration={vi.fn()}
+      />
+    </>
   );
 }
+
+it("searches a suggested agent immediately and still accepts a different manual search", async () => {
+  setup();
+  await using _screen = await render(<Step suggestedQuery="factory-droid" />);
+  await page.getByRole("button", { name: "Search suggestion" }).click();
+
+  const search = page.getByRole("searchbox", { name: "Search ACP Registry" });
+  await expect.element(search).toHaveValue("factory-droid");
+  expect(state.search).toHaveBeenLastCalledWith({
+    environmentId,
+    input: { query: "factory-droid" },
+  });
+  expect(state.prepare).not.toHaveBeenCalled();
+
+  await search.fill("gemini");
+  await userEvent.keyboard("{Enter}");
+  expect(state.search).toHaveBeenLastCalledWith({ environmentId, input: { query: "gemini" } });
+  expect(state.prepare).not.toHaveBeenCalled();
+});
 
 function setup() {
   state.canManage = true;

@@ -18,6 +18,7 @@ import { buildThreadRouteParams } from "../../threadRoutes";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import type { SidebarThreadSummary } from "../../types";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { ProjectDocsSection } from "../projectDocs/ProjectDocsSection";
 import { Button } from "../ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../ui/empty";
 import { ScrollArea } from "../ui/scroll-area";
@@ -125,6 +126,12 @@ function ProjectOverviewBody({ project }: { readonly project: SidebarProjectSnap
             New thread
           </Button>
         </div>
+
+        <ProjectDocsSection
+          projectKey={project.projectKey}
+          environmentId={project.environmentId}
+          projectId={project.id}
+        />
 
         {total === 0 ? (
           <p className="text-sm text-muted-foreground">

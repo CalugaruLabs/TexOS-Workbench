@@ -330,6 +330,15 @@ export function summarizeT3ToolCalls(
         quantity(countEntities(entityIds("cwd")), "repository", "repositories"),
       );
       break;
+    case "doc-list":
+      label = phrase("Listed", "list", `project docs ${times}`);
+      break;
+    case "doc-read":
+      label = phrase("Read", "read", quantity(countEntities(entityIds("docId")), "project doc"));
+      break;
+    case "doc-write":
+      label = phrase("Wrote", "write", quantity(selected.length, "project doc"));
+      break;
     case "environment-read":
       label = phrase("Checked", "check", `environment preferences ${times}`);
       break;

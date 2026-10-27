@@ -359,6 +359,15 @@ import {
   ScheduledTaskUpsertInput,
   ScheduledTaskMutationResult,
 } from "./scheduledTask.ts";
+import {
+  ProjectDoc,
+  ProjectDocDeleteInput,
+  ProjectDocError,
+  ProjectDocListInput,
+  ProjectDocListResult,
+  ProjectDocReadInput,
+  ProjectDocSaveInput,
+} from "./projectDocs.ts";
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
 import {
   ProjectCloneActionInput,
@@ -513,6 +522,11 @@ export const WS_METHODS = {
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
+
+  projectDocsSubscribe: "projectDocs.subscribe",
+  projectDocsRead: "projectDocs.read",
+  projectDocsSave: "projectDocs.save",
+  projectDocsDelete: "projectDocs.delete",
 
   scheduledTasksList: "scheduledTasks.list",
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
@@ -1813,6 +1827,31 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
   stream: true,
 });
 
+const WsProjectDocsSubscribeRpc = Rpc.make(WS_METHODS.projectDocsSubscribe, {
+  payload: ProjectDocListInput,
+  success: ProjectDocListResult,
+  error: Schema.Union([ProjectDocError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsProjectDocsReadRpc = Rpc.make(WS_METHODS.projectDocsRead, {
+  payload: ProjectDocReadInput,
+  success: ProjectDoc,
+  error: Schema.Union([ProjectDocError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectDocsSaveRpc = Rpc.make(WS_METHODS.projectDocsSave, {
+  payload: ProjectDocSaveInput,
+  success: ProjectDoc,
+  error: Schema.Union([ProjectDocError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectDocsDeleteRpc = Rpc.make(WS_METHODS.projectDocsDelete, {
+  payload: ProjectDocDeleteInput,
+  success: Schema.Struct({}),
+  error: Schema.Union([ProjectDocError, EnvironmentAuthorizationError]),
+});
+
 const WsScheduledTasksListRpc = Rpc.make(WS_METHODS.scheduledTasksList, {
   payload: ScheduledTaskListInput,
   success: ScheduledTaskListResult,
@@ -1967,6 +2006,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,
+  WsProjectDocsSubscribeRpc,
+  WsProjectDocsReadRpc,
+  WsProjectDocsSaveRpc,
+  WsProjectDocsDeleteRpc,
   WsScheduledTasksListRpc,
   WsScheduledTasksSubscribeRpc,
   WsScheduledTasksUpsertRpc,

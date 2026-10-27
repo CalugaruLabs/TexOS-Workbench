@@ -49,6 +49,7 @@ import { Route as ChatSettingsAboutRouteImport } from './routes/_chat.settings.a
 import { Route as ChatProjectProjectKeyRouteImport } from './routes/_chat.project.$projectKey'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
+import { Route as ChatProjectProjectKeyDocsDocIdRouteImport } from './routes/_chat.project.$projectKey_.docs.$docId'
 
 const WelcomeRoute = WelcomeRouteImport.update({
   id: '/welcome',
@@ -254,6 +255,12 @@ const ChatEnvironmentIdThreadIdRoute =
     path: '/$environmentId/$threadId',
     getParentRoute: () => ChatRoute,
   } as any)
+const ChatProjectProjectKeyDocsDocIdRoute =
+  ChatProjectProjectKeyDocsDocIdRouteImport.update({
+    id: '/project/$projectKey_/docs/$docId',
+    path: '/project/$projectKey/docs/$docId',
+    getParentRoute: () => ChatRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
@@ -295,6 +302,7 @@ export interface FileRoutesByFullPath {
   '/settings/storage': typeof ChatSettingsStorageRoute
   '/settings/threads': typeof ChatSettingsThreadsRoute
   '/settings/worktrees': typeof ChatSettingsWorktreesRoute
+  '/project/$projectKey/docs/$docId': typeof ChatProjectProjectKeyDocsDocIdRoute
 }
 export interface FileRoutesByTo {
   '/connect': typeof ConnectRoute
@@ -336,6 +344,7 @@ export interface FileRoutesByTo {
   '/settings/storage': typeof ChatSettingsStorageRoute
   '/settings/threads': typeof ChatSettingsThreadsRoute
   '/settings/worktrees': typeof ChatSettingsWorktreesRoute
+  '/project/$projectKey/docs/$docId': typeof ChatProjectProjectKeyDocsDocIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -379,6 +388,7 @@ export interface FileRoutesById {
   '/_chat/settings/storage': typeof ChatSettingsStorageRoute
   '/_chat/settings/threads': typeof ChatSettingsThreadsRoute
   '/_chat/settings/worktrees': typeof ChatSettingsWorktreesRoute
+  '/_chat/project/$projectKey_/docs/$docId': typeof ChatProjectProjectKeyDocsDocIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -422,6 +432,7 @@ export interface FileRouteTypes {
     | '/settings/storage'
     | '/settings/threads'
     | '/settings/worktrees'
+    | '/project/$projectKey/docs/$docId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/connect'
@@ -463,6 +474,7 @@ export interface FileRouteTypes {
     | '/settings/storage'
     | '/settings/threads'
     | '/settings/worktrees'
+    | '/project/$projectKey/docs/$docId'
   id:
     | '__root__'
     | '/_chat'
@@ -505,6 +517,7 @@ export interface FileRouteTypes {
     | '/_chat/settings/storage'
     | '/_chat/settings/threads'
     | '/_chat/settings/worktrees'
+    | '/_chat/project/$projectKey_/docs/$docId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -799,6 +812,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatEnvironmentIdThreadIdRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/project/$projectKey_/docs/$docId': {
+      id: '/_chat/project/$projectKey_/docs/$docId'
+      path: '/project/$projectKey/docs/$docId'
+      fullPath: '/project/$projectKey/docs/$docId'
+      preLoaderRoute: typeof ChatProjectProjectKeyDocsDocIdRouteImport
+      parentRoute: typeof ChatRoute
+    }
   }
 }
 
@@ -871,6 +891,7 @@ interface ChatRouteChildren {
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
   ChatDraftDraftIdRoute: typeof ChatDraftDraftIdRoute
   ChatProjectProjectKeyRoute: typeof ChatProjectProjectKeyRoute
+  ChatProjectProjectKeyDocsDocIdRoute: typeof ChatProjectProjectKeyDocsDocIdRoute
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
@@ -882,6 +903,7 @@ const ChatRouteChildren: ChatRouteChildren = {
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
   ChatDraftDraftIdRoute: ChatDraftDraftIdRoute,
   ChatProjectProjectKeyRoute: ChatProjectProjectKeyRoute,
+  ChatProjectProjectKeyDocsDocIdRoute: ChatProjectProjectKeyDocsDocIdRoute,
 }
 
 const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)

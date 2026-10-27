@@ -3,8 +3,9 @@ import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environ
 import { resolveProviderInstanceDisplayName } from "@t3tools/client-runtime/state/provider-instance-display";
 import { projectBelongsToWorkspaceArea } from "@t3tools/client-runtime/state/workspace-areas";
 import { Link } from "@tanstack/react-router";
-import { LayersIcon, PlusIcon } from "lucide-react";
+import { LayersIcon, MessagesSquareIcon, PlusIcon } from "lucide-react";
 
+import { useComposerDraftStore } from "../../composerDraftStore";
 import { isElectron } from "../../env";
 import { useClientSettings } from "../../hooks/useSettings";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
@@ -31,6 +32,7 @@ import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import {
   groupProjectOverviewThreads,
   PROJECT_OVERVIEW_SECTIONS,
+  projectMainChatBrief,
   type ProjectOverviewThread,
 } from "./projectOverview.logic";
 
@@ -76,6 +78,15 @@ function ProjectOverviewBody({ project }: { readonly project: SidebarProjectSnap
     projectBelongsToWorkspaceArea(area, project.memberProjectRefs),
   );
   const total = Object.values(sections).reduce((sum, list) => sum + list.length, 0);
+  const projectRef = scopeProjectRef(project.environmentId, project.id);
+
+  const startMainChat = async () => {
+    const opened = await handleNewThread(projectRef);
+    if (opened === null) return;
+    useComposerDraftStore
+      .getState()
+      .setPrompt(opened.draftId, projectMainChatBrief(project.displayName));
+  };
 
   const agentLabel = (thread: SidebarThreadSummary) => {
     const provider = providersByEnvironment
@@ -105,10 +116,11 @@ function ProjectOverviewBody({ project }: { readonly project: SidebarProjectSnap
               ))}
             </p>
           </div>
-          <Button
-            size="sm"
-            onClick={() => void handleNewThread(scopeProjectRef(project.environmentId, project.id))}
-          >
+          <Button size="sm" variant="outline" onClick={() => void startMainChat()}>
+            <MessagesSquareIcon className="size-4" />
+            Start main chat
+          </Button>
+          <Button size="sm" onClick={() => void handleNewThread(projectRef)}>
             <PlusIcon className="size-4" />
             New thread
           </Button>
@@ -116,30 +128,38 @@ function ProjectOverviewBody({ project }: { readonly project: SidebarProjectSnap
 
         {total === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No threads yet. Start one with any of your agents.
+            No threads yet. Start a main chat to plan the work and hand tasks to any of your agents,
+            or start a thread yourself.
           </p>
         ) : (
-          PROJECT_OVERVIEW_SECTIONS.map((section) =>
-            sections[section.id].length === 0 ? null : (
-              <section key={section.id} aria-labelledby={`project-overview-${section.id}`}>
-                <h2
-                  id={`project-overview-${section.id}`}
-                  className="mb-2 text-xs font-medium text-muted-foreground"
-                >
-                  {section.title} · {sections[section.id].length}
-                </h2>
-                <ul className="flex flex-col divide-y rounded-lg border">
-                  {sections[section.id].map((entry) => (
-                    <OverviewThreadRow
-                      key={`${entry.thread.environmentId}:${entry.thread.id}`}
-                      entry={entry}
-                      agent={agentLabel(entry.thread)}
-                    />
-                  ))}
-                </ul>
-              </section>
-            ),
-          )
+          <>
+            {sections.pinned.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                Pin a thread from its menu to keep it at the top as this project's main chat.
+              </p>
+            ) : null}
+            {PROJECT_OVERVIEW_SECTIONS.map((section) =>
+              sections[section.id].length === 0 ? null : (
+                <section key={section.id} aria-labelledby={`project-overview-${section.id}`}>
+                  <h2
+                    id={`project-overview-${section.id}`}
+                    className="mb-2 text-xs font-medium text-muted-foreground"
+                  >
+                    {section.title} · {sections[section.id].length}
+                  </h2>
+                  <ul className="flex flex-col divide-y rounded-lg border">
+                    {sections[section.id].map((entry) => (
+                      <OverviewThreadRow
+                        key={`${entry.thread.environmentId}:${entry.thread.id}`}
+                        entry={entry}
+                        agent={agentLabel(entry.thread)}
+                      />
+                    ))}
+                  </ul>
+                </section>
+              ),
+            )}
+          </>
         )}
       </WorkspacePageContainer>
     </ScrollArea>

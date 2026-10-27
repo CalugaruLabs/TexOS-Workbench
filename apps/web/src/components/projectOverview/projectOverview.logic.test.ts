@@ -61,6 +61,20 @@ describe("groupProjectOverviewThreads", () => {
     expect(titles(sections.earlier)).toEqual(["idle"]);
   });
 
+  it("puts pinned threads first whatever their state, so a main chat stays on top", () => {
+    const sections = groupProjectOverviewThreads(
+      [
+        thread("main chat", { pinnedAt: "2026-10-27T10:00:00.000Z", hasPendingUserInput: true }),
+        thread("question", { hasPendingUserInput: true }),
+      ],
+      projectRefs,
+    );
+
+    expect(titles(sections.pinned)).toEqual(["main chat"]);
+    expect(sections.pinned[0]?.pill?.label).toBe("Awaiting Input");
+    expect(titles(sections["needs-you"])).toEqual(["question"]);
+  });
+
   it("keeps only live threads of the project's member folders, newest first", () => {
     const sections = groupProjectOverviewThreads(
       [

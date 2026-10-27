@@ -109,7 +109,7 @@ it("creates an area with a project, selects its chats and restores the saved org
   ]);
   expect(state.saved?.timestampFormat).toBe("24-hour");
 
-  await page.getByRole("button", { name: "Show chats in Alpha", exact: true }).first().click();
+  await page.getByRole("button", { name: "Open Alpha", exact: true }).first().click();
   expect(state.select).toHaveBeenCalledWith(project.projectKey);
   await page.getByRole("button", { name: "Show all project chats" }).click();
   expect(state.select).toHaveBeenLastCalledWith(null);
@@ -125,9 +125,7 @@ it("creates an area with a project, selects its chats and restores the saved org
     .element(page.getByRole("button", { name: "Area Career", exact: true }))
     .toHaveAttribute("aria-expanded", "false");
   await page.getByRole("button", { name: "Area Career", exact: true }).click();
-  await expect
-    .element(page.getByRole("button", { name: "Show chats in Alpha" }).first())
-    .toBeVisible();
+  await expect.element(page.getByRole("button", { name: "Open Alpha" }).first()).toBeVisible();
 });
 
 it("renames an area, can cancel removal, then removes only its organization", async () => {
@@ -145,7 +143,7 @@ it("renames an area, can cancel removal, then removes only its organization", as
   await page.getByRole("button", { name: "Remove area", exact: true }).click();
   await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
   expect(state.saved?.sidebarWorkspaceAreas).toEqual([]);
-  await expect.element(page.getByRole("button", { name: "Show chats in Alpha" })).toBeVisible();
+  await expect.element(page.getByRole("button", { name: "Open Alpha" })).toBeVisible();
   await page.getByRole("button", { name: "Add project to workspace" }).click();
   expect(state.addProject).toHaveBeenCalledOnce();
 });
@@ -175,17 +173,17 @@ it("reveals longer project lists and keeps the selected project reachable when s
   }));
   await using _screen = await render(<Navigation projects={projects} />);
   await expect
-    .element(page.getByRole("button", { name: "Show chats in Project 9", exact: true }))
+    .element(page.getByRole("button", { name: "Open Project 9", exact: true }))
     .not.toBeInTheDocument();
   await page.getByRole("button", { name: "Show all projects in project list" }).click();
-  await page.getByRole("button", { name: "Show chats in Project 9", exact: true }).click();
+  await page.getByRole("button", { name: "Open Project 9", exact: true }).click();
   expect(state.select).toHaveBeenLastCalledWith("group-9");
   await page.getByRole("button", { name: "Show fewer projects in project list" }).click();
   await expect
-    .element(page.getByRole("button", { name: "Show chats in Project 9", exact: true }))
+    .element(page.getByRole("button", { name: "Open Project 9", exact: true }))
     .toHaveAttribute("aria-current", "page");
   await expect
-    .element(page.getByRole("button", { name: "Show chats in Project 8", exact: true }))
+    .element(page.getByRole("button", { name: "Open Project 8", exact: true }))
     .not.toBeInTheDocument();
   await _screen.rerender(<Navigation projects={[...projects.slice(0, 6), projects[8]!]} />);
   await expect
@@ -220,6 +218,6 @@ it("retains unavailable project links through editing and shows them when the en
     .element(page.getByText("Linked projects aren't available here."))
     .not.toBeInTheDocument();
   await expect
-    .element(page.getByRole("button", { name: "Show chats in Remote project" }).first())
+    .element(page.getByRole("button", { name: "Open Remote project" }).first())
     .toBeVisible();
 });

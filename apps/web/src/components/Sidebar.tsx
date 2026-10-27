@@ -2851,7 +2851,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         <SidebarWorkspaceNavigation
           projects={projectGroups}
           selectedProjectKey={projectScopeKey}
-          onSelectProject={setProjectScopeKey}
+          onSelectProject={(key) => {
+            setProjectScopeKey(key);
+            if (key !== null) {
+              void router.navigate({ to: "/project/$projectKey", params: { projectKey: key } });
+            }
+          }}
           onAddProject={openAddProjectCommandPalette}
         />
         <SidebarGroup className="flex-1" role="presentation">

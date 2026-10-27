@@ -258,7 +258,7 @@ function WorkspaceProjectRows({
       {shown.map((project) => (
         <Item key={project.projectKey}>
           <SidebarMenuButton
-            aria-label={`Show chats in ${project.displayName}`}
+            aria-label={`Open ${project.displayName}`}
             aria-current={selectedProjectKey === project.projectKey ? "page" : undefined}
             isActive={selectedProjectKey === project.projectKey}
             onClick={() => onSelectProject(project.projectKey)}

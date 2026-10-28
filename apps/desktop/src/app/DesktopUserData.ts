@@ -39,9 +39,10 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
   }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    // Own profile names, so an installed T3 Code's profile is never reused or copied.
     const names = input.isDevelopment
-      ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }
-      : { current: "t3code-v2", legacy: "T3 Code (Alpha)" };
+      ? { current: "texos-workbench-dev", legacy: "TexOS Workbench (Dev)" }
+      : { current: "texos-workbench", legacy: "TexOS Workbench (Alpha)" };
     const destinationPath = path.join(input.appDataDirectory, names.current);
     const legacyPath = path.join(input.appDataDirectory, names.legacy);
     const inspect = (resourcePath: string) =>
@@ -62,7 +63,7 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
     const legacyState = path.join(legacyPath, "Local State");
     const sourceState = (yield* inspect(legacyState))
       ? legacyState
-      : path.join(input.appDataDirectory, "t3code", "Local State");
+      : path.join(input.appDataDirectory, "texos-workbench-v1", "Local State");
     if (!(yield* inspect(sourceState))) return destinationPath;
     // Windows safeStorage keys live here. Copy only these preferences, never locked databases.
     const state = yield* fs

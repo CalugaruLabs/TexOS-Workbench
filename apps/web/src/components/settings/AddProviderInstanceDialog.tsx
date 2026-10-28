@@ -274,17 +274,22 @@ export function AddProviderInstanceDialog({
     setHasAttemptedSubmit(false);
   };
 
-  const handleLocalAcpConfiguration = () => {
+  const handleLocalAcpConfiguration = (preset?: "hermes") => {
     setDriver(ACP_REGISTRY_DRIVER_KIND);
     setSelectedAcp(null);
     setIsManualAcpConfiguration(true);
     setConfigByDriver((existing) => ({
       ...existing,
-      [ACP_REGISTRY_DRIVER_KIND]: { source: "local", commandArgs: [] },
+      [ACP_REGISTRY_DRIVER_KIND]: {
+        source: "local",
+        ...(preset === "hermes"
+          ? { commandPath: "hermes", commandArgs: ["acp"] }
+          : { commandArgs: [] }),
+      },
     }));
     setIdentityByDriver((existing) =>
       updateProviderIdentityDraft(existing, ACP_REGISTRY_DRIVER_KIND, {
-        label: "Local ACP",
+        label: preset === "hermes" ? "Hermes" : "Local ACP",
         instanceIdOverride: null,
       }),
     );
@@ -498,13 +503,37 @@ export function AddProviderInstanceDialog({
                     </div>
                   ) : (
                     <>
+                      <div className="grid gap-2">
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            disabled={!canManageProviders || isPreparingRegistryAgent}
+                            onClick={() => handleLocalAcpConfiguration("hermes")}
+                            size="sm"
+                            variant="outline"
+                          >
+                            Connect Hermes
+                          </Button>
+                          <Button
+                            disabled={isPreparingRegistryAgent}
+                            onClick={() => registry.submit("factory-droid")}
+                            size="sm"
+                            variant="outline"
+                          >
+                            Find Factory Droid
+                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Hermes must already be installed on {environmentLabel}. Find Factory Droid
+                          in the agent catalog below.
+                        </p>
+                      </div>
                       <AcpRegistrySearchStep
                         environmentId={environmentId}
                         registry={registry}
                         providerInstances={settings.providerInstances}
                         onPrepared={handleAcpPrepared}
                         onManualConfiguration={handleManualAcpConfiguration}
-                        onLocalConfiguration={handleLocalAcpConfiguration}
+                        onLocalConfiguration={() => handleLocalAcpConfiguration()}
                       />
                       {isAcpRegistry && hasAttemptedSubmit && acpSelectionError ? (
                         <p className="mt-2 text-2xs text-destructive">{acpSelectionError}</p>

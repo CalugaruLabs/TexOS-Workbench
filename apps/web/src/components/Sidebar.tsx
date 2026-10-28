@@ -115,6 +115,7 @@ import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { registerSettleAndAdvance } from "../settleAndAdvance";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings } from "../hooks/useSettings";
+import { SidebarWorkspaceNavigation } from "./sidebar/SidebarWorkspaceNavigation";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
@@ -2847,7 +2848,19 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           </SidebarGroup>
         }
       >
+        <SidebarWorkspaceNavigation
+          projects={projectGroups}
+          selectedProjectKey={projectScopeKey}
+          onSelectProject={(key) => {
+            setProjectScopeKey(key);
+            if (key !== null) {
+              void router.navigate({ to: "/project/$projectKey", params: { projectKey: key } });
+            }
+          }}
+          onAddProject={openAddProjectCommandPalette}
+        />
         <SidebarGroup className="flex-1" role="presentation">
+          <h2 className="px-2 pb-1 text-xs font-medium text-sidebar-muted-foreground">Chats</h2>
           {isSearchingThreads ? (
             threadSearchResults.length > 0 ? (
               <TooltipProvider

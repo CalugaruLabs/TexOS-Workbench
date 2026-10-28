@@ -64,8 +64,11 @@ export function hydratePosixHome(
 export const fixPath = Effect.fn("fixPath")(function* (options?: {
   readonly shellEnvironmentPrepared?: boolean | undefined;
 }): Effect.fn.Return<void, never, FileSystem.FileSystem | Path.Path> {
-  const platform = yield* HostProcess.Platform;
   const env = yield* HostProcess.Environment;
+  // Native TexOS owns execution and supplies the child environment. Do not read
+  // the owner's login shell/profile or hydrate HOME/PATH in this presentation server.
+  if (env.T3CODE_TEXOS_NATIVE_BRIDGE === "1") return;
+  const platform = yield* HostProcess.Platform;
 
   if (platform === "win32") {
     // Desktop already populated the child env; repeating PowerShell probes costs seconds.

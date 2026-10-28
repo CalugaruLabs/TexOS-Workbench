@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import {
   defaultInstanceIdForDriver,
   isProviderWorkspaceSnapshotCurrent,
@@ -355,59 +356,63 @@ export const layer = Layer.effect(
       fallbackByInstance.set(source.instanceId, provider);
     }
 
-    const cachedProviders = yield* Effect.forEach(
-      bootSources,
-      (source) =>
-        Effect.gen(function* () {
-          const filePath = yield* resolveProviderStatusCachePath({
-            cacheDir: config.providerStatusCacheDir,
-            instanceId: source.instanceId,
-          }).pipe(Effect.provideService(Path.Path, path));
-          const fallbackProvider = fallbackByInstance.get(source.instanceId);
-          if (fallbackProvider === undefined) {
-            return undefined;
-          }
-          return yield* readProviderStatusCache(filePath).pipe(
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-            Effect.flatMap((cachedProvider) => {
-              if (cachedProvider === undefined) {
-                return Effect.void.pipe(Effect.as(undefined as ServerProvider | undefined));
+    const cachedProviders = isNativeTexos()
+      ? fallbackProviders
+      : yield* Effect.forEach(
+          bootSources,
+          (source) =>
+            Effect.gen(function* () {
+              const filePath = yield* resolveProviderStatusCachePath({
+                cacheDir: config.providerStatusCacheDir,
+                instanceId: source.instanceId,
+              }).pipe(Effect.provideService(Path.Path, path));
+              const fallbackProvider = fallbackByInstance.get(source.instanceId);
+              if (fallbackProvider === undefined) {
+                return undefined;
               }
-              const correlation = {
-                cachedProvider,
-                fallbackProvider,
-              } as const;
-              if (!isCachedProviderCorrelated(correlation)) {
-                return Effect.logWarning("provider status cache identity mismatch, ignoring", {
-                  path: filePath,
-                  instanceId: source.instanceId,
-                  cachedInstanceId: cachedProvider.instanceId ?? null,
-                  driver: source.driverKind,
-                  cachedDriver: cachedProvider.driver ?? null,
-                }).pipe(Effect.as(undefined as ServerProvider | undefined));
-              }
-              return Effect.succeed(hydrateCachedProvider(correlation));
+              return yield* readProviderStatusCache(filePath).pipe(
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+                Effect.flatMap((cachedProvider) => {
+                  if (cachedProvider === undefined) {
+                    return Effect.void.pipe(Effect.as(undefined as ServerProvider | undefined));
+                  }
+                  const correlation = {
+                    cachedProvider,
+                    fallbackProvider,
+                  } as const;
+                  if (!isCachedProviderCorrelated(correlation)) {
+                    return Effect.logWarning("provider status cache identity mismatch, ignoring", {
+                      path: filePath,
+                      instanceId: source.instanceId,
+                      cachedInstanceId: cachedProvider.instanceId ?? null,
+                      driver: source.driverKind,
+                      cachedDriver: cachedProvider.driver ?? null,
+                    }).pipe(Effect.as(undefined as ServerProvider | undefined));
+                  }
+                  return Effect.succeed(hydrateCachedProvider(correlation));
+                }),
+              );
             }),
-          );
-        }),
-      { concurrency: "unbounded" },
-    ).pipe(
-      Effect.map((providers) =>
-        orderProviderSnapshots(
-          providers.filter((provider): provider is ServerProvider => provider !== undefined),
-        ),
-      ),
-    );
+          { concurrency: "unbounded" },
+        ).pipe(
+          Effect.map((providers) =>
+            orderProviderSnapshots(
+              providers.filter((provider): provider is ServerProvider => provider !== undefined),
+            ),
+          ),
+        );
     const initialManifest = yield* manifestService.current;
     const classifyCompatibility = (
       provider: ServerProvider,
       manifest: ModelManifest.ModelManifestData,
     ) =>
-      applyProviderCompatibility(
-        provider,
-        manifest.compatibility,
-        ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,
-      );
+      isNativeTexos()
+        ? provider
+        : applyProviderCompatibility(
+            provider,
+            manifest.compatibility,
+            ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,
+          );
     const providersRef = yield* Ref.make<ReadonlyArray<ServerProvider>>(
       cachedProviders.map((provider) => classifyCompatibility(provider, initialManifest)),
     );

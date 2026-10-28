@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import * as NodeOS from "node:os";
 
 import {
@@ -153,6 +154,23 @@ export class UsageService extends Context.Service<
 >()("t3/usage/UsageService") {}
 
 export const make = Effect.gen(function* () {
+  if (isNativeTexos()) {
+    const native: UsageService["Service"] & { readonly awaitPersisted: Effect.Effect<void> } = {
+      readSummary: Effect.fn("UsageService.readSummary")((_input: UsageSummaryInput) =>
+        Effect.fail(
+          new UsageReadError({
+            reason: "scanFailed",
+            detail: "Usage remains in native TexOS; Workbench transcript scanning is disabled.",
+          }),
+        ),
+      ),
+      refreshRates: Effect.die(
+        new Error("Workbench rate fetching is disabled in native TexOS presentation."),
+      ),
+      awaitPersisted: Effect.void,
+    };
+    return native;
+  }
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig.ServerConfig;

@@ -144,6 +144,9 @@ const detectLinuxMachineKind = Effect.fn("detectLinuxMachineKind")(function* () 
 
 export const detectServerEnvironmentMachineKind = Effect.fn("detectServerEnvironmentMachineKind")(
   function* () {
+    const env = yield* HostProcess.Environment;
+    // Native owns the host; this presentation profile needs no machine inventory.
+    if (env.T3CODE_TEXOS_NATIVE_BRIDGE === "1") return null;
     const platform = yield* HostProcess.Platform;
     switch (platform) {
       case "darwin":

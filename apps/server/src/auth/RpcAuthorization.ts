@@ -1,3 +1,4 @@
+import { isNativeTexos, nativeRpcAllowed } from "../nativeTexos/profile.ts";
 import {
   CLIENT_GUARDED_RPC_SCOPES,
   type DeviceListInput,
@@ -112,6 +113,8 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverReportClientActivity]: AuthOrchestrationReadScope,
   [WS_METHODS.serverReportHostPowerState]: AuthEnvironmentMaintainScope,
   [WS_METHODS.serverGetBackgroundPolicy]: AuthOrchestrationReadScope,
+  [WS_METHODS.projectDocsSubscribe]: AuthOrchestrationReadScope,
+  [WS_METHODS.projectDocsRead]: AuthOrchestrationReadScope,
   [WS_METHODS.scheduledTasksList]: AuthOrchestrationReadScope,
   [WS_METHODS.scheduledTasksSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.secretsAnswerRequest]: AuthOrchestrationOperateScope,
@@ -284,6 +287,13 @@ export const layer = (
   onAuthorized?: (method: string, payload: unknown) => Effect.Effect<void>,
 ) =>
   Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {
+    if (isNativeTexos() && !nativeRpcAllowed(rpc._tag))
+      return Effect.fail(
+        new EnvironmentAuthorizationError({
+          message: "Unsupported in bounded native TexOS chat presentation.",
+          ...authScopeRequiredResponse(AuthOrchestrationOperateScope),
+        }),
+      );
     const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);
     const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));
     if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));

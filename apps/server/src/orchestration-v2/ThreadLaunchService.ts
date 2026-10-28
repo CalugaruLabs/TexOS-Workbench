@@ -1,3 +1,4 @@
+import { isNativeTexos, nativeCommandProblem } from "../nativeTexos/profile.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
@@ -801,6 +802,72 @@ const make = Effect.gen(function* () {
 
   const launch: ThreadLaunchService["Service"]["launch"] = Effect.fn("ThreadLaunchService.launch")(
     function* (request) {
+      if (isNativeTexos()) {
+        const fail = mapError(request, "create-thread", request.threadId);
+        if (
+          !request.threadId ||
+          request.reuseExistingThread ||
+          request.importedNativeThread ||
+          request.workspaceStrategy.type !== "root" ||
+          request.workspaceStrategy.branch != null
+        )
+          return yield* fail("Only fresh metadata-only native chat launch is supported.");
+        const create = {
+          type: "thread.create" as const,
+          commandId: request.commandId,
+          threadId: request.threadId,
+          projectId: request.projectId,
+          title: request.title,
+          modelSelection: request.modelSelection,
+          runtimeMode: request.runtimeMode,
+          interactionMode: request.interactionMode,
+          branch: null,
+          worktreePath: null,
+          createdBy: request.createdBy,
+          creationSource: request.creationSource,
+        };
+        const problem = nativeCommandProblem(create);
+        if (problem) return yield* fail(problem);
+        if (request.initialMessage) {
+          const problem = nativeCommandProblem({
+            ...request.initialMessage,
+            type: "message.dispatch",
+            dispatchMode: { type: "start_immediately" },
+            modelSelection: request.modelSelection,
+            createdBy: request.createdBy,
+            creationSource: request.creationSource,
+          });
+          if (problem) return yield* fail(problem);
+        }
+        yield* threads.dispatch(create).pipe(Effect.mapError(fail));
+        if (request.initialMessage) {
+          const message = {
+            ...request.initialMessage,
+            messageId:
+              request.initialMessage.messageId ??
+              (yield* ids.allocate
+                .message({ threadId: request.threadId, ordinal: 1 })
+                .pipe(Effect.mapError(fail))),
+            type: "message.dispatch" as const,
+            commandId: CommandId.make(`${request.commandId}:initial-message`),
+            threadId: request.threadId,
+            modelSelection: request.modelSelection,
+            dispatchMode: { type: "start_immediately" as const },
+            createdBy: request.createdBy,
+            creationSource: request.creationSource,
+          };
+          const messageProblem = nativeCommandProblem(message);
+          if (messageProblem) return yield* fail(messageProblem);
+          yield* threads.dispatch(message).pipe(Effect.mapError(fail));
+        }
+        return {
+          threadId: request.threadId,
+          projection: yield* threads
+            .getThreadProjection(request.threadId)
+            .pipe(Effect.mapError(fail)),
+          resumed: false,
+        };
+      }
       // Scratch has no Git repository. Normalize before folder allocation so
       // durable preparation and retries use the thread's own Scratch folder.
       const input: ThreadLaunchInput =

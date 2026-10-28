@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import {
   CommandId,
   type OrchestrationProjectShell,
@@ -174,6 +175,7 @@ export const make = Effect.gen(function* () {
   });
 
   const hydrate = Effect.fn("ProjectService.hydrate")(function* (row: ProjectStore.ProjectRow) {
+    if (isNativeTexos()) return toProject(row, null);
     const enrichment =
       row.deletedAt === null
         ? yield* projectEnrichment.getAvailable(row.workspaceRoot)
@@ -327,6 +329,28 @@ export const make = Effect.gen(function* () {
 
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
     function* (input) {
+      if (isNativeTexos()) {
+        if (
+          input.workspaceRoot !== "/__texos_native_preview__" ||
+          input.createWorkspaceRootIfMissing ||
+          input.scripts?.length
+        )
+          return yield* new ProjectOperationError({
+            operation: "normalize-workspace",
+            projectId: input.projectId,
+            cause:
+              "Native chat projects are projection metadata only; arbitrary folders/scripts are unsupported.",
+          });
+        yield* commit({
+          type: "project.create",
+          commandId: input.commandId,
+          projectId: input.projectId,
+          title: input.title,
+          workspaceRoot: "/__texos_native_preview__",
+          scripts: [],
+        });
+        return yield* readCommitted(input.projectId);
+      }
       const workspaceRoot = yield* normalizeWorkspaceRoot({
         projectId: input.projectId,
         workspaceRoot: input.workspaceRoot,
@@ -509,12 +533,14 @@ export const make = Effect.gen(function* () {
   );
 
   const enrichShell = (shell: OrchestrationProjectShell) =>
-    projectEnrichment.getAvailable(shell.workspaceRoot).pipe(
-      Effect.map((enrichment) => ({
-        ...shell,
-        repositoryIdentity: enrichment.repositoryIdentity,
-      })),
-    );
+    isNativeTexos()
+      ? Effect.succeed({ ...shell, repositoryIdentity: null })
+      : projectEnrichment.getAvailable(shell.workspaceRoot).pipe(
+          Effect.map((enrichment) => ({
+            ...shell,
+            repositoryIdentity: enrichment.repositoryIdentity,
+          })),
+        );
 
   const getShell: ProjectService["Service"]["getShell"] = Effect.fn("ProjectService.getShell")(
     function* (projectId) {
@@ -557,6 +583,38 @@ export const make = Effect.gen(function* () {
     } satisfies ProjectSnapshot;
   });
 
+  if (isNativeTexos()) {
+    const existing = yield* projects.listShells().pipe(
+      Effect.mapError((cause) => new ProjectOperationError({ operation: "list-projects", cause })),
+      Effect.orDie,
+    );
+    if (existing.some((project) => project.workspaceRoot !== "/__texos_native_preview__"))
+      return yield* Effect.die(
+        new Error(
+          "Native chat preview requires its private projection store; existing project stores are forbidden.",
+        ),
+      );
+    yield* commit({
+      type: "project.create",
+      commandId: CommandId.make("native-texos:preview-project"),
+      projectId: ProjectId.make("native-texos-preview"),
+      title: "Native TexOS Chat Preview · Synthetic",
+      workspaceRoot: "/__texos_native_preview__",
+      scripts: [],
+    }).pipe(Effect.orDie);
+    yield* commit({
+      type: "project.meta.update",
+      commandId: CommandId.make("native-texos:preview-settings"),
+      projectId: ProjectId.make("native-texos-preview"),
+      defaultModelSelection: {
+        instanceId: "codex" as import("@t3tools/contracts").ProviderInstanceId,
+        model: "native-settings",
+      },
+      defaultThreadEnvMode: "local",
+      autoPull: false,
+      scripts: [],
+    }).pipe(Effect.orDie);
+  }
   return ProjectService.of({
     create,
     bootstrap,

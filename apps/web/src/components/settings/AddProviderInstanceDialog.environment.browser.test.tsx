@@ -245,6 +245,34 @@ describe("AddProviderInstanceDialog environment routing", () => {
     expect(signInStep()).toBeNull();
   });
 
+  it("connects installed Hermes in the selected environment without replacing another account", async () => {
+    setup();
+    settingsHooks.read.mockReturnValue({
+      providerInstances: {
+        acpRegistry_hermes: { driver: "acpRegistry", displayName: "Hermes", enabled: false },
+      },
+    });
+    await using _screen = await render(dialog());
+    await click("Connect Hermes");
+    expect(settingsHooks.mutate).not.toHaveBeenCalled();
+    await click("Next");
+    await click("Add instance");
+
+    expect(settingsHooks.useMutation).toHaveBeenCalledWith(remoteEnvironmentId);
+    expect(settingsHooks.mutate).toHaveBeenCalledExactlyOnceWith({
+      operation: "create",
+      instanceId: "acpRegistry_hermes_2",
+      instance: {
+        driver: "acpRegistry",
+        enabled: true,
+        displayName: "Hermes",
+        config: { source: "local", commandPath: "hermes", commandArgs: ["acp"] },
+      },
+    });
+    expect(actions.onOpenChange).toHaveBeenCalledWith(false);
+    expect(signInStep()).toBeNull();
+  });
+
   it("rejects a queued save after the provider grant is revoked", async () => {
     setup();
     await using screen = await prepareCodexInstance();

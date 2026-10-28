@@ -758,7 +758,13 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
     });
   }
 
-  const serverResolvesCommandContext = yield* supportsServerResolvedCommandContext();
+  const presentationConfig = yield* getInitialServerConfig();
+  const nativePresentation =
+    presentationConfig.providers?.some(
+      (provider) => provider.badgeLabel === "Native TexOS execution in Workbench",
+    ) === true;
+  const serverResolvesCommandContext =
+    presentationConfig.environment.capabilities.serverResolvedCommandContext === true;
   const projection = serverResolvesCommandContext ? null : yield* getProjection(input.threadId);
   const activeRun = projection?.runs.findLast(
     (run) =>
@@ -799,6 +805,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
                   ? ({ type: "restart_active", targetRunId: activeRun.id } as const)
                   : ({ type: "queue_after_active" } as const);
   const shouldSendTitleSeed =
+    !nativePresentation &&
     input.titleSeed !== undefined &&
     (serverResolvesCommandContext || projection?.messages.length === 0);
   return yield* dispatch({
@@ -817,7 +824,9 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
     ...(shouldSendTitleSeed ? { titleSeed: input.titleSeed } : {}),
     ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
     ...(input.sourceProposedPlan === undefined ? {} : { sourcePlanRef: input.sourceProposedPlan }),
-    ...(serverResolvesCommandContext && requestedMode !== "queue"
+    ...(serverResolvesCommandContext &&
+    requestedMode !== "queue" &&
+    !(nativePresentation && requestedMode === "auto")
       ? { deliveryIntent: requestedMode }
       : {}),
     dispatchMode,

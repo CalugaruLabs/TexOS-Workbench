@@ -79,6 +79,9 @@ export interface ClientTracingConfig {
 }
 
 export function configureClientTracing(config: ClientTracingConfig = {}): Promise<void> {
+  // This native presentation artifact has no browser telemetry route. Stop before
+  // URL resolution, queued configuration, runtime creation or exporter startup.
+  if (import.meta.env.VITE_TEXOS_NATIVE_PRESENTATION === "1") return Promise.resolve();
   if (config.exportIntervalMs === undefined && activeConfigKey !== null) {
     return pendingConfiguration;
   }

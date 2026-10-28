@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -39,18 +40,25 @@ const resolveInstance = (
   operation: TextGenerationOp,
   instanceId: ProviderInstanceId,
 ): Effect.Effect<ProviderInstance["textGeneration"], TextGenerationError> =>
-  registry.getInstance(instanceId).pipe(
-    Effect.flatMap((instance) =>
-      instance
-        ? Effect.succeed(instance.textGeneration)
-        : Effect.fail(
-            new TextGenerationError({
-              operation,
-              detail: `No provider instance registered for id '${instanceId}'.`,
-            }),
-          ),
-    ),
-  );
+  isNativeTexos()
+    ? Effect.fail(
+        new TextGenerationError({
+          operation,
+          detail: "Auxiliary model generation is disabled in native TexOS presentation.",
+        }),
+      )
+    : registry.getInstance(instanceId).pipe(
+        Effect.flatMap((instance) =>
+          instance
+            ? Effect.succeed(instance.textGeneration)
+            : Effect.fail(
+                new TextGenerationError({
+                  operation,
+                  detail: `No provider instance registered for id '${instanceId}'.`,
+                }),
+              ),
+        ),
+      );
 
 /** @public */
 export const make = Effect.gen(function* () {

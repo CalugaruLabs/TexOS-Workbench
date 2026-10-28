@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import {
   CheckpointId,
   CheckpointRef,
@@ -258,7 +259,9 @@ export const layer: Layer.Layer<
       workspaceLocks.withLock(cwd, effect);
 
     const isGitCheckpointable = (cwd: string) =>
-      checkpointStore.isGitRepository(cwd).pipe(Effect.orElseSucceed(() => false));
+      isNativeTexos()
+        ? Effect.succeed(false)
+        : checkpointStore.isGitRepository(cwd).pipe(Effect.orElseSucceed(() => false));
 
     const ensureScope: CheckpointServiceV2Shape["ensureScope"] = (scope) => Effect.succeed(scope);
 

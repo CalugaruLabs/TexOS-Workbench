@@ -1,5 +1,21 @@
 # Settings and project overrides
 
+## Areas and projects in Workbench
+
+The default web and desktop sidebar shows **Areas** and **Projects**. Create an area to keep related
+projects together, then choose which projects belong to it. A project can belong
+to more than one area. Use an area's edit button to rename it or change its projects.
+
+Choose a project to show its chats, or **All projects** to return to the full list.
+Long lists have a **Show more** control and keep the selected project visible.
+The chat header shows the current project's Areas; choose that label to reopen the sidebar.
+
+Removing an area leaves its projects, chats and files intact. Area names,
+memberships and each area's collapsed state are saved on this device; they are not synced
+to other devices or imported from your existing TexOS records.
+
+## Choosing where settings apply
+
 On web and desktop, the "Applying settings for …" sentence at the top of Settings pages picks
 the project and environment a change applies to. Pages that only hold device preferences, such as
 Appearance, don't show it. They start at **All projects** and **All environments**

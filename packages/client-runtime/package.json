@@ -227,6 +227,10 @@
       "types": "./src/state/projectGrouping.ts",
       "default": "./src/state/projectGrouping.ts"
     },
+    "./state/workspace-areas": {
+      "types": "./src/state/workspaceAreas.ts",
+      "default": "./src/state/workspaceAreas.ts"
+    },
     "./state/relay": {
       "types": "./src/state/relayDiscovery.ts",
       "default": "./src/state/relayDiscovery.ts"

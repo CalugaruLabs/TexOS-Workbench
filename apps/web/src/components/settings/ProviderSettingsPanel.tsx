@@ -98,6 +98,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { ExpandableText } from "./ExpandableText";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
+import { RequiredAgentsSection } from "./RequiredAgentsSection";
 import { UsageProviderSettings } from "./UsageProviderSettings";
 import { ProviderSetupSection, readAntigravityAuthMethod } from "./ProviderSetupSection";
 import { ProviderAuthenticationSection } from "./ProviderAuthenticationSection";
@@ -978,6 +979,13 @@ export function EnvironmentProviderSettings({
 
   return (
     <>
+      <RequiredAgentsSection
+        providers={serverProviders}
+        instances={settings.providerInstances}
+        readOnly={readOnly}
+        onSetUp={() => setIsAddInstanceDialogOpen(true)}
+        onOpen={setSelectedInstanceId}
+      />
       <SettingsSection
         {...searchableSetting("providers")}
         variant="plain"

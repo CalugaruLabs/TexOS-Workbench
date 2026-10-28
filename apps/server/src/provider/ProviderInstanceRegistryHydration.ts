@@ -1,3 +1,5 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
+import * as NativeTexosRegistry from "../nativeTexos/registry.ts";
 import {
   defaultInstanceIdForDriver,
   providerInstanceConfigEnabledFlag,
@@ -96,6 +98,7 @@ export const layer: Layer.Layer<
   ProviderInstanceRegistryHydrationEnv
 > = Layer.unwrap(
   Effect.gen(function* () {
+    if (isNativeTexos()) return NativeTexosRegistry.layer;
     const serverSettings = yield* Settings.ServerSettingsService;
     // Subscribe before the seed read so saves during registry construction are queued.
     const settingsChanges = yield* serverSettings.subscribeChanges;

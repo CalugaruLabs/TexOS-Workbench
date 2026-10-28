@@ -66,6 +66,7 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
   readonly projectionRequests?: ThreadId[];
   readonly advertiseServerResolvedCommandContext?: boolean;
   readonly advertiseThreadStop?: boolean;
+  readonly nativePresentation?: boolean;
 }) {
   const client = {
     [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
@@ -110,6 +111,9 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
   const session: RpcSession.RpcSession = {
     client,
     initialConfig: Effect.succeed({
+      providers: input.nativePresentation
+        ? [{ badgeLabel: "Native TexOS execution in Workbench" }]
+        : [],
       environment: {
         capabilities: {
           repositoryIdentity: true,
@@ -693,3 +697,46 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestCrypto)),
   );
 });
+
+it.effect(
+  "native empty server-thread first send strips only title and automatic delivery metadata",
+  () =>
+    Effect.gen(function* () {
+      for (const nativePresentation of [true, false]) {
+        const commands: OrchestrationV2Command[] = [];
+        const supervisor = yield* makeSupervisor({ commands, projects: [], nativePresentation });
+        yield* startThreadTurn({
+          commandId: CommandId.make(`native-empty-${nativePresentation}`),
+          threadId: v2ThreadId,
+          message: {
+            messageId: MessageId.make("native-first-user"),
+            role: "user",
+            text: "Synthetic first reply",
+            attachments: [],
+          },
+          titleSeed: "Synthetic first reply",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "native-settings",
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+        const command = commands[0]!;
+        expect(command).toMatchObject({
+          type: "message.dispatch",
+          text: "Synthetic first reply",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          modelSelection: { instanceId: "codex", model: "native-settings" },
+        });
+        if (nativePresentation) {
+          expect(command).not.toHaveProperty("titleSeed");
+          expect(command).not.toHaveProperty("deliveryIntent");
+        } else {
+          expect(command).toHaveProperty("titleSeed", "Synthetic first reply");
+          expect(command).toHaveProperty("deliveryIntent", "auto");
+        }
+      }
+    }).pipe(Effect.provide(layerTestCrypto)),
+);

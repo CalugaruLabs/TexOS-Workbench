@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import type {
   EnvironmentId,
   OrchestrationV2DomainEvent,
@@ -361,6 +362,19 @@ export function resolveAgentAwarenessRelayActiveThreadIds(input: {
 
 /** @public */
 export const make = Effect.gen(function* () {
+  if (isNativeTexos())
+    return AgentAwarenessRelay.of({
+      publishThread: Effect.fn("AgentAwarenessRelay.publishThread")(() =>
+        Effect.die(new Error("Peering is disabled in native chat presentation.")),
+      ),
+      drain: Effect.void,
+      requestCatchUp: Effect.fn("AgentAwarenessRelay.requestCatchUp")(() =>
+        Effect.die(new Error("Peering is disabled in native chat presentation.")),
+      ),
+      start: Effect.fn("AgentAwarenessRelay.start")(() =>
+        Effect.die(new Error("Peering is disabled in native chat presentation.")),
+      ),
+    });
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const threads = yield* ThreadManagement.ThreadManagementService;

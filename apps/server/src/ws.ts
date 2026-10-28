@@ -1,3 +1,4 @@
+import { isNativeTexos } from "./nativeTexos/profile.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -92,7 +93,7 @@ import {
   EnvironmentAuthorizationError,
   type ProjectId,
   type ProviderDriverKind,
-  type ProviderInstanceId,
+  ProviderInstanceId,
   ThreadId,
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
@@ -121,6 +122,7 @@ import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts"
 import * as DocumentText from "./provider/DocumentText.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
+import * as ProjectDocs from "./project/ProjectDocs.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import {
@@ -314,6 +316,7 @@ export const withLateEditorConfig = <E, R>(
   liveUpdates: Stream.Stream<ServerConfigStreamEvent, E, R>,
   launcher: EditorDiscovery,
 ) => {
+  if (isNativeTexos()) return liveUpdates;
   const lateEditorConfig = Stream.fromEffect(launcher.resolveAvailableEditors()).pipe(
     Stream.filter(
       (editors) =>
@@ -1281,6 +1284,7 @@ export const layerWsRpc = (
       const commandOutputHub = yield* CommandOutputHub.CommandOutputHub;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
+      const projectDocs = yield* ProjectDocs.ProjectDocs;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const guestShares = yield* GuestShareService.GuestShareService;
       const pullRequests = yield* PullRequestService.PullRequestService;
@@ -1740,26 +1744,34 @@ export const layerWsRpc = (
         );
         const environment = yield* serverEnvironment.getDescriptor;
         const auth = yield* serverAuth.getDescriptor();
-        const scratchWorkspaceRoot = yield* managedFolders.scratchRoot;
+        const scratchWorkspaceRoot = isNativeTexos()
+          ? Option.none<string>()
+          : yield* managedFolders.scratchRoot;
         const lastEventLoopStall = yield* eventLoopMonitor.latestNoticeableStall;
-        const editorConfig = yield* resolveEditorConfig(
-          yield* resolveAvailableEditorsForConfig(externalLauncher.resolveAvailableEditors()),
-          resolveFileManagerRevealKindForConfig(externalLauncher.resolveFileManagerRevealKind()),
-        );
+        const editorConfig = isNativeTexos()
+          ? { availableEditors: [] }
+          : yield* resolveEditorConfig(
+              yield* resolveAvailableEditorsForConfig(externalLauncher.resolveAvailableEditors()),
+              resolveFileManagerRevealKindForConfig(
+                externalLauncher.resolveFileManagerRevealKind(),
+              ),
+            );
 
         return {
           environment,
           auth,
-          cwd: config.cwd,
+          cwd: isNativeTexos() ? "/__texos_native_preview__" : config.cwd,
           keybindingsConfigPath: config.keybindingsConfigPath,
           keybindings: keybindingsConfig.keybindings,
           issues: keybindingsConfig.issues,
           providers,
           ...editorConfig,
-          remoteOpenTargets: yield* resolveAvailableEditorsForConfig(
-            remoteOpenTargets.resolveTargets(),
-          ),
-          directEndpoints: yield* resolveAvailableEditorsForConfig(directEndpoints.resolve()),
+          remoteOpenTargets: isNativeTexos()
+            ? []
+            : yield* resolveAvailableEditorsForConfig(remoteOpenTargets.resolveTargets()),
+          directEndpoints: isNativeTexos()
+            ? []
+            : yield* resolveAvailableEditorsForConfig(directEndpoints.resolve()),
           observability: {
             logsDirectoryPath: config.logsDir,
             localTracingEnabled: true,
@@ -1788,7 +1800,16 @@ export const layerWsRpc = (
               : {}),
             otlpLogsEnabled: config.otlpLogsUrl !== undefined,
           },
-          settings,
+          settings: isNativeTexos()
+            ? {
+                ...settings,
+                defaultRuntimeMode: "approval-required" as const,
+                defaultModelSelection: {
+                  instanceId: ProviderInstanceId.make("codex"),
+                  model: "native-settings",
+                },
+              }
+            : settings,
           shellResumeCompletionMarker: true,
           shellThreadFamilies: true,
           shellOlderSettled: true,
@@ -1800,7 +1821,9 @@ export const layerWsRpc = (
             onNone: () => ({}),
             onSome: (root) => ({ scratchWorkspaceRoot: root }),
           }),
-          newProjectsRoot: managedFolders.namedProjectsRoot,
+          newProjectsRoot: isNativeTexos()
+            ? "/__texos_native_preview__"
+            : managedFolders.namedProjectsRoot,
           ...(lastEventLoopStall === undefined ? {} : { lastEventLoopStall }),
         };
       });
@@ -2177,6 +2200,10 @@ export const layerWsRpc = (
               Effect.as(commandOutputHub.subscribe(input)),
             ),
           ),
+        [WS_METHODS.projectDocsSubscribe]: (input) => projectDocs.subscribe(input.projectId),
+        [WS_METHODS.projectDocsRead]: (input) => projectDocs.read(input),
+        [WS_METHODS.projectDocsSave]: (input) => projectDocs.save(input, { _tag: "User" }),
+        [WS_METHODS.projectDocsDelete]: (input) => projectDocs.delete(input).pipe(Effect.as({})),
         [WS_METHODS.scheduledTasksList]: (_input) =>
           scheduledTasks.list().pipe(Effect.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
@@ -2536,7 +2563,21 @@ export const layerWsRpc = (
         [WS_METHODS.serverGetStorageCleanupReport]: () => storageCleanup.reports,
         [WS_METHODS.serverGetDatabaseStorage]: () => databaseStorage.status,
         [WS_METHODS.serverGetSettings]: (_input) =>
-          serverSettings.getSettings.pipe(Effect.map(ServerSettings.redactServerSettingsForClient)),
+          serverSettings.getSettings.pipe(
+            Effect.map((settings) => {
+              const redacted = ServerSettings.redactServerSettingsForClient(settings);
+              return isNativeTexos()
+                ? {
+                    ...redacted,
+                    defaultRuntimeMode: "approval-required" as const,
+                    defaultModelSelection: {
+                      instanceId: ProviderInstanceId.make("codex"),
+                      model: "native-settings",
+                    },
+                  }
+                : redacted;
+            }),
+          ),
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {
@@ -3192,7 +3233,19 @@ export const layerWsRpc = (
                     )
                   : Stream.empty;
               const settingsUpdates = settingsChanges.pipe(
-                Stream.map((settings) => ServerSettings.redactServerSettingsForClient(settings)),
+                Stream.map((settings) => {
+                  const redacted = ServerSettings.redactServerSettingsForClient(settings);
+                  return isNativeTexos()
+                    ? {
+                        ...redacted,
+                        defaultRuntimeMode: "approval-required" as const,
+                        defaultModelSelection: {
+                          instanceId: ProviderInstanceId.make("codex"),
+                          model: "native-settings",
+                        },
+                      }
+                    : redacted;
+                }),
                 Stream.map((settings) => ({
                   version: 1 as const,
                   type: "settingsUpdated" as const,
@@ -3305,6 +3358,7 @@ export const layer = Layer.unwrap(
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
+    const projectDocs = yield* ProjectDocs.ProjectDocs;
     const sql = yield* SqlClient.SqlClient;
     return HttpRouter.add(
       "GET",
@@ -3386,6 +3440,8 @@ export const layer = Layer.unwrap(
               // Share server-lifetime PR caches so WS mutations invalidate every client's HTTP diffs.
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
               Layer.provide(OtlpEndpointCheck.layer),
+              // Share one instance so every client and agent hears the same doc changes.
+              Layer.provide(Layer.succeed(ProjectDocs.ProjectDocs, projectDocs)),
               Layer.provide(
                 Layer.succeed(
                   PullRequestReviewGuideService.PullRequestReviewGuideService,

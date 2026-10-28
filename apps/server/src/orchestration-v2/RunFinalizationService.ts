@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import { CheckpointScopeId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -92,6 +93,7 @@ export const layer = Layer.effect(RunFinalizationService, make);
 export const layerObserver = Layer.effect(
   RunFinalizationObserver,
   Effect.gen(function* () {
+    if (isNativeTexos()) return { refreshAfterTurn: () => Effect.void, refresh: () => Effect.void };
     const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
     const vcsStatus = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
     const projections = yield* ProjectionStore.ProjectionStoreV2;

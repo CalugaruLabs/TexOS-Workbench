@@ -1,5 +1,7 @@
 import {
   MessageId,
+  EventId,
+  ProviderTurnId,
   RuntimeRequestId,
   CheckpointId,
   CheckpointScopeId,
@@ -17,6 +19,7 @@ import {
   type OrchestrationV2RunAttempt,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import { applyOrchestrationV2ProjectionEvent } from "@t3tools/client-runtime/state/orchestration-v2-projection";
 import type { ThreadRuntimeSummary } from "@t3tools/client-runtime/state/shell";
 import { deriveMessagesTimelineRows } from "./components/chat/MessagesTimeline.logic";
 import * as DateTime from "effect/DateTime";
@@ -1689,4 +1692,103 @@ it("renders automatic completion as a work entry instead of a user bubble", () =
       ],
     })[0]?.kind,
   ).toBe("message");
+});
+
+it("projects native assistant turn items into one live timeline reply and settles the same row", () => {
+  const initial = makeThreadProjectionFixture();
+  const timestamp = DateTime.makeUnsafe("2026-10-28T00:00:00.000Z");
+  const messageId = MessageId.make("native-texos:preview-attempt");
+  const message = {
+    id: messageId,
+    threadId: initial.thread.id,
+    runId: RunId.make("native-preview-run"),
+    nodeId: NodeId.make("native-preview-root"),
+    role: "assistant" as const,
+    text: "NATIVE_PREVIEW_REPLY",
+    attachments: [],
+    streaming: false,
+    createdBy: "agent" as const,
+    creationSource: "provider" as const,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const storedOnly = applyOrchestrationV2ProjectionEvent(initial, {
+    id: EventId.make("native-message-stored"),
+    type: "message.updated",
+    threadId: initial.thread.id,
+    occurredAt: timestamp,
+    payload: message,
+  });
+  if (storedOnly === null) throw new Error("Missing native message projection");
+  expect(storedOnly.messages).toEqual([message]);
+  // The cold-smoke failure: a persisted assistant message alone creates no row.
+  expect(
+    deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: storedOnly.visibleTurnItems,
+      optimisticMessages: [],
+    }),
+  ).toEqual([]);
+  const running: Extract<OrchestrationV2TurnItem, { type: "assistant_message" }> = {
+    id: TurnItemId.make("native-texos:assistant:preview-attempt"),
+    threadId: message.threadId,
+    runId: message.runId,
+    nodeId: message.nodeId,
+    providerThreadId: ProviderThreadId.make("native-preview-thread"),
+    providerTurnId: ProviderTurnId.make("native-texos:preview-attempt"),
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: 1,
+    status: "running",
+    title: null,
+    startedAt: timestamp,
+    completedAt: null,
+    updatedAt: timestamp,
+    type: "assistant_message",
+    messageId,
+    text: "NATIVE_PREVIEW_",
+    attachments: [],
+    streaming: true,
+  };
+  const live = applyOrchestrationV2ProjectionEvent(storedOnly, {
+    id: EventId.make("native-item-live"),
+    type: "turn-item.updated",
+    threadId: message.threadId,
+    occurredAt: timestamp,
+    payload: running,
+  });
+  if (live === null) throw new Error("Missing native live projection");
+  const input = { visibleTurnItems: live.visibleTurnItems, optimisticMessages: [] };
+  const before = deriveTimelineEntriesFromVisibleTurnItemsWithState(input);
+  expect(before.entries).toHaveLength(1);
+  expect(before.entries[0]).toMatchObject({
+    kind: "message",
+    message: { id: messageId, text: "NATIVE_PREVIEW_", streaming: true },
+  });
+  const completed = {
+    ...running,
+    status: "completed" as const,
+    text: message.text,
+    streaming: false,
+    completedAt: timestamp,
+  };
+  const settled = applyOrchestrationV2ProjectionEvent(live, {
+    id: EventId.make("native-item-completed"),
+    type: "turn-item.updated",
+    threadId: message.threadId,
+    occurredAt: timestamp,
+    payload: completed,
+  });
+  if (settled === null) throw new Error("Missing native settled projection");
+  const after = deriveTimelineEntriesFromVisibleTurnItemsWithState(
+    { ...input, visibleTurnItems: settled.visibleTurnItems },
+    before,
+  );
+  expect(settled.turnItems).toHaveLength(1);
+  expect(settled.visibleTurnItems).toHaveLength(1);
+  expect(after.entries).toHaveLength(1);
+  expect(after.entries[0]).toMatchObject({
+    kind: "message",
+    message: { id: messageId, text: message.text, streaming: false },
+  });
+  expect(after.entries[0]?.id).toBe(before.entries[0]?.id);
 });

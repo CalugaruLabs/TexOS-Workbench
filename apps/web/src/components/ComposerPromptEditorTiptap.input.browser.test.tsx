@@ -33,10 +33,12 @@ function Composer({
   value,
   richTextEnabled,
   skills,
+  literalText = false,
   onChange,
 }: {
   value: string;
   richTextEnabled: boolean;
+  literalText?: boolean;
   skills: ReadonlyArray<ServerProviderSkill>;
   onChange?: ComposerPromptEditorProps["onChange"] | undefined;
 }) {
@@ -47,6 +49,7 @@ function Composer({
       value={prompt.value}
       cursor={prompt.cursor}
       richTextEnabled={richTextEnabled}
+      literalText={literalText}
       contextRecords={new Map()}
       skills={skills}
       disabled={false}
@@ -435,5 +438,27 @@ describe("an Arabic line", () => {
     expect(editor.view.coordsAtPos(editor.state.selection.head).left).toBeGreaterThan(
       box.left + box.width / 2,
     );
+  });
+});
+
+it("native text-only editor keeps file, skill and command-like text literal while typing", async () => {
+  const onChange = vi.fn<ComposerPromptEditorProps["onChange"]>();
+  await using screen = await render(
+    <Composer
+      value=""
+      richTextEnabled={false}
+      literalText
+      skills={[babysit]}
+      onChange={onChange}
+    />,
+  );
+  const editor = editorIn(screen.container);
+  const text = "@folder/file $babysit /command";
+  await userEvent.type(screen.getByTestId("composer-editor"), text);
+  await expect.element(screen.getByTestId("composer-editor")).toHaveTextContent(text);
+  expect(onChange.mock.calls.at(-1)?.[0]).toBe(text);
+  expect(editor.getJSON()).toMatchObject({
+    type: "doc",
+    content: [{ type: "paragraph", content: [{ type: "text", text }] }],
   });
 });

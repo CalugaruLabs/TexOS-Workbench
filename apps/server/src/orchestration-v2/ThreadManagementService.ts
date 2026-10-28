@@ -1,3 +1,4 @@
+import { isNativeTexos, nativeCommandProblem } from "../nativeTexos/profile.ts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -576,6 +577,7 @@ const make = Effect.gen(function* () {
   const ensureLegacyTranscript = Effect.fn(
     "orchestrationV2.threadManagement.ensureLegacyTranscript",
   )(function* (threadId: ThreadId) {
+    if (isNativeTexos()) return;
     yield* legacyImporter.ensureTranscript(threadId).pipe(
       Effect.tapError((cause) =>
         Effect.logWarning("Unable to hydrate migrated v1 thread transcript", {
@@ -692,7 +694,18 @@ const make = Effect.gen(function* () {
   };
 
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
-    ensureCommandTranscripts(command).pipe(
+    Effect.suspend((): Effect.Effect<void, Orchestrator.OrchestratorV2Error> => {
+      const problem = isNativeTexos() ? nativeCommandProblem(command) : undefined;
+      return problem
+        ? Effect.fail(
+            new Orchestrator.OrchestratorCommandRejectedError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: problem,
+            }),
+          )
+        : ensureCommandTranscripts(command);
+    }).pipe(
       Effect.andThen(assertDispatchTargetEnabled(command)),
       Effect.andThen(orchestrator.dispatch(command)),
     );

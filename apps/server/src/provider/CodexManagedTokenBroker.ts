@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Server-owned private pipe/Unix socket, never a public listener.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeNet from "node:net";
@@ -208,6 +209,15 @@ const acquireListener = Effect.gen(function* () {
   return { endpoint: owned.endpoint, awaitIdle: FiberSet.awaitEmpty(jobs) };
 });
 const make = Effect.gen(function* () {
+  if (isNativeTexos())
+    return CodexManagedTokenBroker.of({
+      endpoint: Effect.fail(
+        new BrokerStartError({
+          cause: "Native TexOS presentation has no provider credential broker.",
+        }),
+      ),
+      awaitIdle: Effect.void,
+    });
   const scope = yield* Scope.fork(yield* Effect.scope);
   const acquired = yield* acquireListener.pipe(Scope.provide(scope), Effect.result);
   if (acquired._tag === "Failure") {

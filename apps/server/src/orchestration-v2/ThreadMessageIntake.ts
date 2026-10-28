@@ -1,3 +1,4 @@
+import { isNativeTexos, nativeCommandProblem } from "../nativeTexos/profile.ts";
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import { appendUserInputAttachmentPaths } from "../provider/userInputAttachments.ts";
 import type { ChatAttachment, OrchestrationV2Command } from "@t3tools/contracts";
@@ -84,6 +85,15 @@ const withGuestAttachments = Effect.fn("ThreadMessageIntake.withGuestAttachments
 export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(function* (
   incoming: OrchestrationV2Command,
 ) {
+  if (isNativeTexos()) {
+    const problem = nativeCommandProblem(incoming);
+    if (problem)
+      return yield* new Orchestrator.OrchestratorCommandRejectedError({
+        commandId: incoming.commandId,
+        commandType: incoming.type,
+        cause: problem,
+      });
+  }
   const command =
     incoming.type === "message.dispatch" ? yield* withGuestAttachments(incoming) : incoming;
   const threads = yield* ThreadManagement.ThreadManagementService;

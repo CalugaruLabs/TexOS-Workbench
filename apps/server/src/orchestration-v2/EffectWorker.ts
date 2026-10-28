@@ -1,3 +1,4 @@
+import { isNativeTexos, isFreshPreviewThread } from "../nativeTexos/profile.ts";
 import { CommandId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -96,6 +97,31 @@ export const layerExecutor: Layer.Layer<
     const settings = yield* ServerSettings.ServerSettingsService;
     return OrchestrationEffectExecutorV2.of({
       execute: Effect.fn("OrchestrationEffectExecutorV2.execute")(function (effect, options) {
+        if (
+          isNativeTexos() &&
+          !["provider-turn.start", "provider-turn.interrupt", "checkpoint.capture"].includes(
+            effect.request.type,
+          )
+        )
+          return Effect.fail(
+            new OrchestrationEffectExecutionError({
+              effectId: effect.id,
+              effectType: effect.request.type,
+              cause: "Unsupported background operation in one-turn native chat presentation.",
+            }),
+          );
+        if (
+          isNativeTexos() &&
+          effect.request.type === "provider-turn.start" &&
+          !isFreshPreviewThread(effect.threadId)
+        )
+          return Effect.fail(
+            new OrchestrationEffectExecutionError({
+              effectId: effect.id,
+              effectType: effect.request.type,
+              cause: "Old preview turns cannot be replayed after restart. Start a new thread.",
+            }),
+          );
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
           case "provider-runtime.continue": {
@@ -187,7 +213,7 @@ export const layerExecutor: Layer.Layer<
                   () => Effect.void,
                 ),
                 Effect.andThen((outcome) =>
-                  request.subagent !== undefined && outcome === undefined
+                  isNativeTexos() || (request.subagent !== undefined && outcome === undefined)
                     ? Effect.void
                     : threads.dispatch({
                         type: "thread.background-work.settle",

@@ -339,6 +339,15 @@ export function summarizeT3ToolCalls(
     case "doc-write":
       label = phrase("Wrote", "write", quantity(selected.length, "project doc"));
       break;
+    case "workspace-list":
+      label = phrase("Listed", "list", `workspace items ${times}`);
+      break;
+    case "workspace-add":
+      label = phrase("Added", "add", quantity(selected.length, "workspace item"));
+      break;
+    case "workspace-update":
+      label = phrase("Updated", "update", quantity(selected.length, "workspace item"));
+      break;
     case "environment-read":
       label = phrase("Checked", "check", `environment preferences ${times}`);
       break;

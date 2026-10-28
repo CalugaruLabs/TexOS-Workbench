@@ -454,7 +454,11 @@ export const ClientSettingsSchema = Schema.Struct({
   showSkillsInSlashMenu: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarWorkingShelfEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Areas now live on the server; this device-local copy is only read once to move them there.
   sidebarWorkspaceAreas: Schema.Array(SidebarWorkspaceArea).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  sidebarCollapsedAreaIds: Schema.Array(Schema.String).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
@@ -1684,6 +1688,7 @@ export const ClientSettingsPatch = Schema.Struct({
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkspaceAreas: Schema.optionalKey(Schema.Array(SidebarWorkspaceArea)),
+  sidebarCollapsedAreaIds: Schema.optionalKey(Schema.Array(Schema.String)),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
   sidebarProjectGroupingOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, SidebarProjectGroupingMode),

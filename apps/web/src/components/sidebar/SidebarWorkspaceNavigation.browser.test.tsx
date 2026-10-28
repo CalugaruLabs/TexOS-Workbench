@@ -1,9 +1,13 @@
-import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import {
-  DEFAULT_CLIENT_SETTINGS,
-  type ClientSettings,
-  type SidebarWorkspaceArea,
-} from "@t3tools/contracts/settings";
+  EnvironmentId,
+  ProjectId,
+  WorkspaceAreaId,
+  type WorkspaceArea,
+  type WorkspaceSaveAreaInput,
+} from "@t3tools/contracts";
+import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
+import * as Cause from "effect/Cause";
+import { AsyncResult } from "effect/reactivity";
 import { useState } from "react";
 import { expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
@@ -17,6 +21,9 @@ import "../../index.css";
 
 const state = vi.hoisted(() => ({
   saved: null as ClientSettings | null,
+  areas: [] as WorkspaceArea[],
+  listeners: new Set<() => void>(),
+  saveFailure: null as string | null,
   persist: vi.fn(),
   select: vi.fn(),
   addProject: vi.fn(),
@@ -33,6 +40,54 @@ vi.mock("~/localApi", () => ({
     },
   }),
 }));
+
+// Stands in for the server workspace: commands change the areas every subscriber sees.
+vi.mock("~/hooks/useWorkspace", async () => {
+  const { useSyncExternalStore } = await import("react");
+  const setAreas = (areas: WorkspaceArea[]) => {
+    state.areas = areas;
+    for (const listener of state.listeners) listener();
+  };
+  const subscribe = (listener: () => void) => {
+    state.listeners.add(listener);
+    return () => state.listeners.delete(listener);
+  };
+  return {
+    useMigrateDeviceAreas: () => undefined,
+    useWorkspace: () => ({
+      environmentId: "local",
+      workspace: null,
+      areas: useSyncExternalStore(subscribe, () => state.areas),
+    }),
+    useWorkspaceAreaCommands: () => ({
+      canWrite: true,
+      saveArea: async (input: WorkspaceSaveAreaInput) => {
+        if (state.saveFailure !== null) {
+          const message = state.saveFailure;
+          state.saveFailure = null;
+          return AsyncResult.failure(Cause.fail(new Error(message)));
+        }
+        const area: WorkspaceArea = {
+          id: input.areaId ?? WorkspaceAreaId.make(`area-${state.areas.length + 1}`),
+          name: input.name.trim(),
+          projectRefs: input.projectRefs,
+          createdAt: "2026-10-28T12:00:00.000Z",
+          updatedAt: "2026-10-28T12:00:00.000Z",
+        };
+        setAreas(
+          state.areas.some((candidate) => candidate.id === area.id)
+            ? state.areas.map((candidate) => (candidate.id === area.id ? area : candidate))
+            : [...state.areas, area],
+        );
+        return AsyncResult.success(area);
+      },
+      deleteArea: async (areaId: WorkspaceAreaId) => {
+        setAreas(state.areas.filter((area) => area.id !== areaId));
+        return AsyncResult.success({});
+      },
+    }),
+  };
+});
 
 const project: SidebarProjectSnapshot = {
   id: ProjectId.make("alpha"),
@@ -56,11 +111,12 @@ const project: SidebarProjectSnapshot = {
     { environmentId: EnvironmentId.make("local"), projectId: ProjectId.make("alpha") },
   ],
 };
-const career: SidebarWorkspaceArea = {
-  id: "career",
+const career: WorkspaceArea = {
+  id: WorkspaceAreaId.make("career"),
   name: "Career",
-  collapsed: false,
   projectRefs: [...project.memberProjectRefs],
+  createdAt: "2026-10-28T12:00:00.000Z",
+  updatedAt: "2026-10-28T12:00:00.000Z",
 };
 
 function Navigation({
@@ -84,13 +140,12 @@ function Navigation({
   );
 }
 
-function setup(areas: SidebarWorkspaceArea[] = []) {
+function setup(areas: WorkspaceArea[] = []) {
   __resetClientSettingsPersistenceForTests();
-  state.saved = {
-    ...DEFAULT_CLIENT_SETTINGS,
-    timestampFormat: "24-hour",
-    sidebarWorkspaceAreas: areas,
-  };
+  state.saved = { ...DEFAULT_CLIENT_SETTINGS, timestampFormat: "24-hour" };
+  state.areas = areas;
+  state.listeners.clear();
+  state.saveFailure = null;
   state.persist.mockReset().mockResolvedValue(undefined);
   state.select.mockReset();
   state.addProject.mockReset();
@@ -104,10 +159,9 @@ it("creates an area with a project, selects its chats and restores the saved org
   await page.getByRole("checkbox", { name: "Alpha", exact: true }).click();
   await page.getByRole("button", { name: "Create area", exact: true }).click();
   await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
-  expect(state.saved?.sidebarWorkspaceAreas).toEqual([
+  expect(state.areas).toEqual([
     expect.objectContaining({ name: "Career", projectRefs: project.memberProjectRefs }),
   ]);
-  expect(state.saved?.timestampFormat).toBe("24-hour");
 
   await page.getByRole("button", { name: "Open Alpha", exact: true }).first().click();
   expect(state.select).toHaveBeenCalledWith(project.projectKey);
@@ -118,6 +172,8 @@ it("creates an area with a project, selects its chats and restores the saved org
   await expect
     .element(page.getByRole("button", { name: "Area Career", exact: true }))
     .toHaveAttribute("aria-expanded", "false");
+  expect(state.saved?.sidebarCollapsedAreaIds).toEqual([state.areas[0]?.id]);
+  expect(state.saved?.timestampFormat).toBe("24-hour");
   await screen.unmount();
   __resetClientSettingsPersistenceForTests();
   await using _restored = await render(<Navigation />);
@@ -138,11 +194,11 @@ it("renames an area, can cancel removal, then removes only its organization", as
   await page.getByRole("button", { name: "Edit area Work" }).click();
   await page.getByRole("button", { name: "Remove area", exact: true }).click();
   await page.getByRole("button", { name: "Keep area" }).click();
-  expect(state.saved?.sidebarWorkspaceAreas[0]?.name).toBe("Work");
+  expect(state.areas[0]?.name).toBe("Work");
   await page.getByRole("button", { name: "Remove area", exact: true }).click();
   await page.getByRole("button", { name: "Remove area", exact: true }).click();
   await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
-  expect(state.saved?.sidebarWorkspaceAreas).toEqual([]);
+  expect(state.areas).toEqual([]);
   await expect.element(page.getByRole("button", { name: "Open Alpha" })).toBeVisible();
   await page.getByRole("button", { name: "Add project to workspace" }).click();
   expect(state.addProject).toHaveBeenCalledOnce();
@@ -150,17 +206,17 @@ it("renames an area, can cancel removal, then removes only its organization", as
 
 it("retains the draft when saving fails and allows retry without claiming it was saved", async () => {
   setup();
-  state.persist.mockRejectedValueOnce(new Error("Storage is full"));
+  state.saveFailure = "Storage is full";
   await using _screen = await render(<Navigation />);
   await page.getByRole("button", { name: "Add area", exact: true }).click();
   await page.getByRole("textbox", { name: "Area name" }).fill("Career");
   await page.getByRole("button", { name: "Create area", exact: true }).click();
   await expect.element(page.getByRole("alert")).toHaveTextContent("Storage is full");
-  expect(state.saved?.sidebarWorkspaceAreas).toEqual([]);
+  expect(state.areas).toEqual([]);
   await expect.element(page.getByRole("textbox", { name: "Area name" })).toHaveValue("Career");
   await page.getByRole("button", { name: "Create area", exact: true }).click();
   await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
-  expect(state.saved?.sidebarWorkspaceAreas).toHaveLength(1);
+  expect(state.areas).toHaveLength(1);
 });
 
 it("reveals longer project lists and keeps the selected project reachable when shortened", async () => {
@@ -203,7 +259,7 @@ it("retains unavailable project links through editing and shows them when the en
   await page.getByRole("textbox", { name: "Area name" }).fill("Remote work");
   await page.getByRole("button", { name: "Save area", exact: true }).click();
   await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
-  expect(state.saved?.sidebarWorkspaceAreas[0]?.projectRefs).toEqual([remoteRef]);
+  expect(state.areas[0]?.projectRefs).toEqual([remoteRef]);
 
   const remote = {
     ...project,

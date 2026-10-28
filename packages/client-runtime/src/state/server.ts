@@ -1169,6 +1169,34 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:project-docs:delete",
       tag: WS_METHODS.projectDocsDelete,
     }),
+    workspaceLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:workspace:live",
+      tag: WS_METHODS.workspaceSubscribe,
+    }),
+    saveWorkspaceArea: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:workspace:save-area",
+      tag: WS_METHODS.workspaceSaveArea,
+    }),
+    deleteWorkspaceArea: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:workspace:delete-area",
+      tag: WS_METHODS.workspaceDeleteArea,
+    }),
+    createWorkspaceItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:workspace:create-item",
+      tag: WS_METHODS.workspaceCreateItem,
+    }),
+    updateWorkspaceItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:workspace:update-item",
+      tag: WS_METHODS.workspaceUpdateItem,
+    }),
+    deleteWorkspaceItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:workspace:delete-item",
+      tag: WS_METHODS.workspaceDeleteItem,
+    }),
+    fileWorkspaceTarget: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:workspace:file",
+      tag: WS_METHODS.workspaceFile,
+    }),
     runStorageCleanup: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:run-storage-cleanup",
       tag: WS_METHODS.serverRunStorageCleanup,

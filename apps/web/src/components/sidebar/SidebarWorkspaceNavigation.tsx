@@ -1,12 +1,14 @@
-import type { SidebarWorkspaceArea } from "@t3tools/contracts/settings";
 import {
   projectBelongsToWorkspaceArea,
-  removeWorkspaceArea,
-  saveWorkspaceArea,
-  setWorkspaceAreaCollapsed,
   updateWorkspaceAreaProjectRefs,
 } from "@t3tools/client-runtime/state/workspace-areas";
-import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  type AtomCommandResult,
+  isAtomCommandInterrupted,
+  settlePromise,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import type { EnvironmentId, ScopedProjectRef, WorkspaceAreaId } from "@t3tools/contracts";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -22,8 +24,12 @@ import {
   useClientSettings,
   useClientSettingsHydrated,
 } from "../../hooks/useSettings";
+import {
+  useMigrateDeviceAreas,
+  useWorkspace,
+  useWorkspaceAreaCommands,
+} from "../../hooks/useWorkspace";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
-import { randomUUID } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import {
@@ -52,6 +58,12 @@ interface WorkspaceNavigationProps {
   readonly onAddProject: () => void;
 }
 
+interface AreaDraft {
+  readonly id?: WorkspaceAreaId;
+  readonly name: string;
+  readonly projectRefs: ReadonlyArray<ScopedProjectRef>;
+}
+
 function failureMessage(result: Parameters<typeof squashAtomCommandFailure>[0]) {
   const error = squashAtomCommandFailure(result);
   return error instanceof Error
@@ -65,24 +77,24 @@ export function SidebarWorkspaceNavigation({
   onSelectProject,
   onAddProject,
 }: WorkspaceNavigationProps) {
-  const areas = useClientSettings((settings) => settings.sidebarWorkspaceAreas);
+  useMigrateDeviceAreas();
+  const { environmentId, areas } = useWorkspace();
+  const collapsedIds = useClientSettings((settings) => settings.sidebarCollapsedAreaIds);
   const hydrated = useClientSettingsHydrated();
-  const [editor, setEditor] = useState<SidebarWorkspaceArea | null>(null);
+  const [editor, setEditor] = useState<AreaDraft | null>(null);
   const [pendingAreaId, setPendingAreaId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const toggleArea = async (area: SidebarWorkspaceArea) => {
+  const toggleArea = async (areaId: WorkspaceAreaId, collapsed: boolean) => {
     if (pendingAreaId !== null) return;
-    setPendingAreaId(area.id);
+    setPendingAreaId(areaId);
     setError(null);
     const result = await settlePromise(() =>
       persistClientSettingsUpdate((current) => ({
         ...current,
-        sidebarWorkspaceAreas: setWorkspaceAreaCollapsed(
-          current.sidebarWorkspaceAreas,
-          area.id,
-          !area.collapsed,
-        ),
+        sidebarCollapsedAreaIds: collapsed
+          ? current.sidebarCollapsedAreaIds.filter((id) => id !== areaId)
+          : [...current.sidebarCollapsedAreaIds, areaId],
       })),
     );
     setPendingAreaId(null);
@@ -96,10 +108,8 @@ export function SidebarWorkspaceNavigation({
           <h2 className="text-xs font-medium text-sidebar-muted-foreground">Areas</h2>
           <Button
             aria-label="Add area"
-            disabled={!hydrated}
-            onClick={() =>
-              setEditor({ id: randomUUID(), name: "", projectRefs: [], collapsed: false })
-            }
+            disabled={environmentId === null}
+            onClick={() => setEditor({ name: "", projectRefs: [] })}
             size="icon-xs"
             variant="ghost-muted"
           >
@@ -108,6 +118,7 @@ export function SidebarWorkspaceNavigation({
         </div>
         <SidebarMenu>
           {areas.map((area) => {
+            const collapsed = collapsedIds.includes(area.id);
             const members = projects.filter((project) =>
               projectBelongsToWorkspaceArea(area, project.memberProjectRefs),
             );
@@ -119,9 +130,9 @@ export function SidebarWorkspaceNavigation({
                     <SidebarMenuButton
                       aria-label={`Area ${area.name}`}
                       aria-controls={`workspace-area-${area.id}`}
-                      aria-expanded={!area.collapsed}
+                      aria-expanded={!collapsed}
                       disabled={pendingAreaId !== null || !hydrated}
-                      onClick={() => void toggleArea(area)}
+                      onClick={() => void toggleArea(area.id, collapsed)}
                       size="sm"
                     >
                       <LayersIcon aria-hidden />
@@ -129,7 +140,7 @@ export function SidebarWorkspaceNavigation({
                       <span className="ml-auto text-xs text-sidebar-muted-foreground">
                         {unavailable ? null : members.length}
                       </span>
-                      {area.collapsed ? (
+                      {collapsed ? (
                         <ChevronRightIcon aria-hidden />
                       ) : (
                         <ChevronDownIcon aria-hidden />
@@ -146,7 +157,7 @@ export function SidebarWorkspaceNavigation({
                     <PencilIcon aria-hidden />
                   </Button>
                 </div>
-                {!area.collapsed ? (
+                {!collapsed ? (
                   <SidebarMenuSub id={`workspace-area-${area.id}`}>
                     <WorkspaceProjectRows
                       projects={members}
@@ -221,9 +232,10 @@ export function SidebarWorkspaceNavigation({
           </p>
         ) : null}
       </SidebarGroup>
-      {editor ? (
+      {editor && environmentId !== null ? (
         <WorkspaceAreaEditor
-          key={editor.id}
+          key={editor.id ?? "new"}
+          environmentId={environmentId}
           area={editor}
           projects={projects}
           onClose={() => setEditor(null)}
@@ -287,55 +299,45 @@ function WorkspaceProjectRows({
 }
 
 function WorkspaceAreaEditor({
+  environmentId,
   area,
   projects,
   onClose,
 }: {
-  readonly area: SidebarWorkspaceArea;
+  readonly environmentId: EnvironmentId;
+  readonly area: AreaDraft;
   readonly projects: ReadonlyArray<SidebarProjectSnapshot>;
   readonly onClose: () => void;
 }) {
-  const areas = useClientSettings((settings) => settings.sidebarWorkspaceAreas);
-  const isNew = !areas.some((candidate) => candidate.id === area.id);
+  const isNew = area.id === undefined;
+  const { canWrite, saveArea, deleteArea } = useWorkspaceAreaCommands(environmentId);
   const [name, setName] = useState(area.name);
   const [projectRefs, setProjectRefs] = useState(area.projectRefs);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmRemoval, setConfirmRemoval] = useState(false);
 
+  const finish = (result: AtomCommandResult<unknown, unknown>) => {
+    setSaving(false);
+    if (result._tag === "Success") onClose();
+    else if (!isAtomCommandInterrupted(result)) setError(failureMessage(result));
+  };
+
   const save = async (event: FormEvent) => {
     event.preventDefault();
     if (saving) return;
     setSaving(true);
     setError(null);
-    const result = await settlePromise(() =>
-      persistClientSettingsUpdate((current) => ({
-        ...current,
-        sidebarWorkspaceAreas: saveWorkspaceArea(current.sidebarWorkspaceAreas, {
-          id: area.id,
-          name,
-          projectRefs,
-        }),
-      })),
+    finish(
+      await saveArea({ ...(area.id === undefined ? {} : { areaId: area.id }), name, projectRefs }),
     );
-    setSaving(false);
-    if (result._tag === "Failure") setError(failureMessage(result));
-    else onClose();
   };
 
   const remove = async () => {
-    if (saving) return;
+    if (saving || area.id === undefined) return;
     setSaving(true);
     setError(null);
-    const result = await settlePromise(() =>
-      persistClientSettingsUpdate((current) => ({
-        ...current,
-        sidebarWorkspaceAreas: removeWorkspaceArea(current.sidebarWorkspaceAreas, area.id),
-      })),
-    );
-    setSaving(false);
-    if (result._tag === "Failure") setError(failureMessage(result));
-    else onClose();
+    finish(await deleteArea(area.id));
   };
 
   return (
@@ -354,7 +356,7 @@ function WorkspaceAreaEditor({
             <DialogDescription>
               {confirmRemoval
                 ? "Your projects, chats and files will stay in All projects."
-                : "Organize related projects together. Saved on this device."}
+                : "Organize related projects together. Synced with your workspace."}
             </DialogDescription>
           </DialogHeader>
           {!confirmRemoval ? (
@@ -442,7 +444,7 @@ function WorkspaceAreaEditor({
                 {saving ? "Removing…" : "Remove area"}
               </Button>
             ) : (
-              <Button disabled={saving || name.trim().length === 0} type="submit">
+              <Button disabled={saving || !canWrite || name.trim().length === 0} type="submit">
                 {saving ? "Saving…" : isNew ? "Create area" : "Save area"}
               </Button>
             )}

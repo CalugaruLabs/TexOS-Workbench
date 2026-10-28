@@ -53,6 +53,9 @@ export type T3McpToolSummaryAction =
   | "doc-list"
   | "doc-read"
   | "doc-write"
+  | "workspace-list"
+  | "workspace-add"
+  | "workspace-update"
   | "environment-read"
   | "environment-update"
   | "attachment-prepare"
@@ -331,6 +334,12 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   t3_doc_list: tool(["List", "Listing", "Listed", "project docs"], "doc-list"),
   t3_doc_read: tool(["Read", "Reading", "Read", "a project doc"], "doc-read"),
   t3_doc_write: tool(["Write", "Writing", "Wrote", "a project doc"], "doc-write"),
+  t3_workspace_list: tool(["List", "Listing", "Listed", "workspace items"], "workspace-list"),
+  t3_workspace_add: tool(["Add", "Adding", "Added", "a workspace item"], "workspace-add"),
+  t3_workspace_update: tool(
+    ["Update", "Updating", "Updated", "a workspace item"],
+    "workspace-update",
+  ),
   t3_attachment_prepare_upload: tool(
     ["Prepare", "Preparing", "Prepared", "an attachment upload"],
     "attachment-prepare",

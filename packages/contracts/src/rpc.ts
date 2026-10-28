@@ -368,6 +368,18 @@ import {
   ProjectDocReadInput,
   ProjectDocSaveInput,
 } from "./projectDocs.ts";
+import {
+  WorkspaceArea,
+  WorkspaceCreateItemInput,
+  WorkspaceDeleteAreaInput,
+  WorkspaceDeleteItemInput,
+  WorkspaceError,
+  WorkspaceFileInput,
+  WorkspaceItem,
+  WorkspaceSaveAreaInput,
+  WorkspaceSnapshot,
+  WorkspaceUpdateItemInput,
+} from "./workspace.ts";
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
 import {
   ProjectCloneActionInput,
@@ -527,6 +539,14 @@ export const WS_METHODS = {
   projectDocsRead: "projectDocs.read",
   projectDocsSave: "projectDocs.save",
   projectDocsDelete: "projectDocs.delete",
+
+  workspaceSubscribe: "workspace.subscribe",
+  workspaceSaveArea: "workspace.saveArea",
+  workspaceDeleteArea: "workspace.deleteArea",
+  workspaceCreateItem: "workspace.createItem",
+  workspaceUpdateItem: "workspace.updateItem",
+  workspaceDeleteItem: "workspace.deleteItem",
+  workspaceFile: "workspace.file",
 
   scheduledTasksList: "scheduledTasks.list",
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
@@ -1852,6 +1872,51 @@ const WsProjectDocsDeleteRpc = Rpc.make(WS_METHODS.projectDocsDelete, {
   error: Schema.Union([ProjectDocError, EnvironmentAuthorizationError]),
 });
 
+const WorkspaceRpcError = Schema.Union([WorkspaceError, EnvironmentAuthorizationError]);
+
+const WsWorkspaceSubscribeRpc = Rpc.make(WS_METHODS.workspaceSubscribe, {
+  payload: Schema.Struct({}),
+  success: WorkspaceSnapshot,
+  error: WorkspaceRpcError,
+  stream: true,
+});
+
+const WsWorkspaceSaveAreaRpc = Rpc.make(WS_METHODS.workspaceSaveArea, {
+  payload: WorkspaceSaveAreaInput,
+  success: WorkspaceArea,
+  error: WorkspaceRpcError,
+});
+
+const WsWorkspaceDeleteAreaRpc = Rpc.make(WS_METHODS.workspaceDeleteArea, {
+  payload: WorkspaceDeleteAreaInput,
+  success: Schema.Struct({}),
+  error: WorkspaceRpcError,
+});
+
+const WsWorkspaceCreateItemRpc = Rpc.make(WS_METHODS.workspaceCreateItem, {
+  payload: WorkspaceCreateItemInput,
+  success: WorkspaceItem,
+  error: WorkspaceRpcError,
+});
+
+const WsWorkspaceUpdateItemRpc = Rpc.make(WS_METHODS.workspaceUpdateItem, {
+  payload: WorkspaceUpdateItemInput,
+  success: WorkspaceItem,
+  error: WorkspaceRpcError,
+});
+
+const WsWorkspaceDeleteItemRpc = Rpc.make(WS_METHODS.workspaceDeleteItem, {
+  payload: WorkspaceDeleteItemInput,
+  success: Schema.Struct({}),
+  error: WorkspaceRpcError,
+});
+
+const WsWorkspaceFileRpc = Rpc.make(WS_METHODS.workspaceFile, {
+  payload: WorkspaceFileInput,
+  success: Schema.Struct({}),
+  error: WorkspaceRpcError,
+});
+
 const WsScheduledTasksListRpc = Rpc.make(WS_METHODS.scheduledTasksList, {
   payload: ScheduledTaskListInput,
   success: ScheduledTaskListResult,
@@ -2010,6 +2075,13 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectDocsReadRpc,
   WsProjectDocsSaveRpc,
   WsProjectDocsDeleteRpc,
+  WsWorkspaceSubscribeRpc,
+  WsWorkspaceSaveAreaRpc,
+  WsWorkspaceDeleteAreaRpc,
+  WsWorkspaceCreateItemRpc,
+  WsWorkspaceUpdateItemRpc,
+  WsWorkspaceDeleteItemRpc,
+  WsWorkspaceFileRpc,
   WsScheduledTasksListRpc,
   WsScheduledTasksSubscribeRpc,
   WsScheduledTasksUpsertRpc,

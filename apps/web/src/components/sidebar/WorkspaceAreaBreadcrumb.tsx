@@ -1,9 +1,9 @@
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { projectBelongsToWorkspaceArea } from "@t3tools/client-runtime/state/workspace-areas";
-import type { SidebarWorkspaceArea } from "@t3tools/contracts/settings";
+import type { WorkspaceArea } from "@t3tools/contracts";
 import { LayersIcon } from "lucide-react";
 
-import { useClientSettings } from "../../hooks/useSettings";
+import { useWorkspace } from "../../hooks/useWorkspace";
 import { useSidebarProjectGroups } from "../../hooks/useSidebarProjectGroups";
 import {
   WorkspaceBreadcrumbItem,
@@ -17,7 +17,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 type AreaProject = Pick<EnvironmentProject, "id" | "environmentId" | "title">;
 
 export function WorkspaceAreaBreadcrumb({ project }: { readonly project: AreaProject }) {
-  const areas = useClientSettings((settings) => settings.sidebarWorkspaceAreas);
+  const { areas } = useWorkspace();
   return areas.length > 0 ? <AreaBreadcrumb project={project} areas={areas} /> : null;
 }
 
@@ -26,7 +26,7 @@ function AreaBreadcrumb({
   areas,
 }: {
   readonly project: AreaProject;
-  readonly areas: ReadonlyArray<SidebarWorkspaceArea>;
+  readonly areas: ReadonlyArray<WorkspaceArea>;
 }) {
   const groups = useSidebarProjectGroups();
   const { isMobile, setOpen, setOpenMobile } = useSidebar();

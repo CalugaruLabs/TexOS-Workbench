@@ -7,7 +7,7 @@ import { LayersIcon, MessagesSquareIcon, PlusIcon } from "lucide-react";
 
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { isElectron } from "../../env";
-import { useClientSettings } from "../../hooks/useSettings";
+import { useWorkspace } from "../../hooks/useWorkspace";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { useSidebarProjectGroups } from "../../hooks/useSidebarProjectGroups";
 import { cn } from "../../lib/utils";
@@ -83,7 +83,7 @@ export function useThreadAgentLabel() {
 function ProjectOverviewBody({ project }: { readonly project: SidebarProjectSnapshot }) {
   const threads = useQuietThreadShells();
   const agentLabel = useThreadAgentLabel();
-  const areas = useClientSettings((settings) => settings.sidebarWorkspaceAreas);
+  const { areas } = useWorkspace();
   const handleNewThread = useNewThreadHandler();
 
   const sections = groupProjectOverviewThreads(threads, project.memberProjectRefs);

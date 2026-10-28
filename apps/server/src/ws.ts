@@ -122,6 +122,7 @@ import * as DocumentText from "./provider/DocumentText.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as ProjectDocs from "./project/ProjectDocs.ts";
+import * as Workspace from "./workspace/Workspace.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import {
@@ -1283,6 +1284,7 @@ export const layerWsRpc = (
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const projectDocs = yield* ProjectDocs.ProjectDocs;
+      const workspace = yield* Workspace.Workspace;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const guestShares = yield* GuestShareService.GuestShareService;
       const pullRequests = yield* PullRequestService.PullRequestService;
@@ -2183,6 +2185,16 @@ export const layerWsRpc = (
         [WS_METHODS.projectDocsRead]: (input) => projectDocs.read(input),
         [WS_METHODS.projectDocsSave]: (input) => projectDocs.save(input, { _tag: "User" }),
         [WS_METHODS.projectDocsDelete]: (input) => projectDocs.delete(input).pipe(Effect.as({})),
+        [WS_METHODS.workspaceSubscribe]: (_input) => workspace.subscribe,
+        [WS_METHODS.workspaceSaveArea]: (input) => workspace.saveArea(input),
+        [WS_METHODS.workspaceDeleteArea]: (input) =>
+          workspace.deleteArea(input.areaId).pipe(Effect.as({})),
+        [WS_METHODS.workspaceCreateItem]: (input) => workspace.createItem(input, { _tag: "User" }),
+        [WS_METHODS.workspaceUpdateItem]: (input) => workspace.updateItem(input),
+        [WS_METHODS.workspaceDeleteItem]: (input) =>
+          workspace.deleteItem(input.itemId).pipe(Effect.as({})),
+        [WS_METHODS.workspaceFile]: (input) =>
+          workspace.file(input, { _tag: "User" }).pipe(Effect.as({})),
         [WS_METHODS.scheduledTasksList]: (_input) =>
           scheduledTasks.list().pipe(Effect.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
@@ -3312,6 +3324,7 @@ export const layer = Layer.unwrap(
     const pullRequests = yield* PullRequestService.PullRequestService;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const projectDocs = yield* ProjectDocs.ProjectDocs;
+    const workspace = yield* Workspace.Workspace;
     const sql = yield* SqlClient.SqlClient;
     return HttpRouter.add(
       "GET",
@@ -3395,6 +3408,7 @@ export const layer = Layer.unwrap(
               Layer.provide(OtlpEndpointCheck.layer),
               // Share one instance so every client and agent hears the same doc changes.
               Layer.provide(Layer.succeed(ProjectDocs.ProjectDocs, projectDocs)),
+              Layer.provide(Layer.succeed(Workspace.Workspace, workspace)),
               Layer.provide(
                 Layer.succeed(
                   PullRequestReviewGuideService.PullRequestReviewGuideService,

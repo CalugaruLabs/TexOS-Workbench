@@ -46,6 +46,12 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
 
   [WS_METHODS.projectDocsSave]: AuthOrchestrationOperateScope,
   [WS_METHODS.projectDocsDelete]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workspaceSaveArea]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workspaceDeleteArea]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workspaceCreateItem]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workspaceUpdateItem]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workspaceDeleteItem]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workspaceFile]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksUpsert]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksSetEnabled]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksDelete]: AuthOrchestrationOperateScope,

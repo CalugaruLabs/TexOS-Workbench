@@ -27,6 +27,26 @@ const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
+describe("workspace area preferences", () => {
+  it("keeps existing client settings valid and round-trips scoped area memberships", () => {
+    expect(decodeClientSettings({}).sidebarWorkspaceAreas).toEqual([]);
+    const sidebarWorkspaceAreas = [
+      {
+        id: "career",
+        name: "Career",
+        collapsed: false,
+        projectRefs: [{ environmentId: "remote", projectId: "project" }],
+      },
+    ];
+    const settings = decodeClientSettings({ sidebarWorkspaceAreas, timestampFormat: "24-hour" });
+    expect(decodeClientSettings(encodeClientSettings(settings)).sidebarWorkspaceAreas).toEqual(
+      sidebarWorkspaceAreas,
+    );
+    expect(decodeClientSettingsPatch({ sidebarWorkspaceAreas })).toEqual({ sidebarWorkspaceAreas });
+    expect(settings.timestampFormat).toBe("24-hour");
+  });
+});
+
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();

@@ -51,6 +51,20 @@
         // Keep this small boot-time copy in sync with the built-in palettes so
         // the selected theme is visible before the app has mounted.
         const BUILT_IN_THEME_PALETTES = {
+          texos: {
+            light: {
+              background: "oklch(0.979553 0.005714 84.566021)",
+              foreground: "oklch(0.238111 0.009693 67.333759)",
+              accent: "oklch(0.737213 0.14831 74.606942)",
+              chrome: "oklch(0.979553 0.005714 84.566021)",
+            },
+            dark: {
+              background: "oklch(0.214928 0.004984 67.558207)",
+              foreground: "oklch(0.932959 0.010838 76.596174)",
+              accent: "oklch(0.799892 0.146289 78.73836)",
+              chrome: "oklch(0.214928 0.004984 67.558207)",
+            },
+          },
           "t3-chat": {
             light: {
               background: "oklch(0.982446 0.010114 325.653)",
@@ -132,6 +146,7 @@
           "system",
           "light",
           "dark",
+          "texos",
           "t3-chat",
           "grove",
           "ocean",
@@ -668,13 +683,13 @@
         white-space: nowrap;
       }
     </style>
-    <title>T3 Code (Beta)</title>
+    <title>TexOS Workbench</title>
   </head>
   <body>
     <div id="root">
       <div id="boot-shell">
-        <div id="boot-shell-card" aria-label="T3 Code splash screen">
-          <img id="boot-shell-logo" src="/apple-touch-icon.png" alt="T3 Code" />
+        <div id="boot-shell-card" aria-label="TexOS Workbench splash screen">
+          <img id="boot-shell-logo" src="/apple-touch-icon.png" alt="TexOS Workbench" />
         </div>
       </div>
     </div>

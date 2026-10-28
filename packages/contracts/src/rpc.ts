@@ -359,6 +359,27 @@ import {
   ScheduledTaskUpsertInput,
   ScheduledTaskMutationResult,
 } from "./scheduledTask.ts";
+import {
+  ProjectDoc,
+  ProjectDocDeleteInput,
+  ProjectDocError,
+  ProjectDocListInput,
+  ProjectDocListResult,
+  ProjectDocReadInput,
+  ProjectDocSaveInput,
+} from "./projectDocs.ts";
+import {
+  WorkspaceArea,
+  WorkspaceCreateItemInput,
+  WorkspaceDeleteAreaInput,
+  WorkspaceDeleteItemInput,
+  WorkspaceError,
+  WorkspaceFileInput,
+  WorkspaceItem,
+  WorkspaceSaveAreaInput,
+  WorkspaceSnapshot,
+  WorkspaceUpdateItemInput,
+} from "./workspace.ts";
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
 import {
   ProjectCloneActionInput,
@@ -513,6 +534,19 @@ export const WS_METHODS = {
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
+
+  projectDocsSubscribe: "projectDocs.subscribe",
+  projectDocsRead: "projectDocs.read",
+  projectDocsSave: "projectDocs.save",
+  projectDocsDelete: "projectDocs.delete",
+
+  workspaceSubscribe: "workspace.subscribe",
+  workspaceSaveArea: "workspace.saveArea",
+  workspaceDeleteArea: "workspace.deleteArea",
+  workspaceCreateItem: "workspace.createItem",
+  workspaceUpdateItem: "workspace.updateItem",
+  workspaceDeleteItem: "workspace.deleteItem",
+  workspaceFile: "workspace.file",
 
   scheduledTasksList: "scheduledTasks.list",
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
@@ -1813,6 +1847,76 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
   stream: true,
 });
 
+const WsProjectDocsSubscribeRpc = Rpc.make(WS_METHODS.projectDocsSubscribe, {
+  payload: ProjectDocListInput,
+  success: ProjectDocListResult,
+  error: Schema.Union([ProjectDocError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsProjectDocsReadRpc = Rpc.make(WS_METHODS.projectDocsRead, {
+  payload: ProjectDocReadInput,
+  success: ProjectDoc,
+  error: Schema.Union([ProjectDocError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectDocsSaveRpc = Rpc.make(WS_METHODS.projectDocsSave, {
+  payload: ProjectDocSaveInput,
+  success: ProjectDoc,
+  error: Schema.Union([ProjectDocError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectDocsDeleteRpc = Rpc.make(WS_METHODS.projectDocsDelete, {
+  payload: ProjectDocDeleteInput,
+  success: Schema.Struct({}),
+  error: Schema.Union([ProjectDocError, EnvironmentAuthorizationError]),
+});
+
+const WorkspaceRpcError = Schema.Union([WorkspaceError, EnvironmentAuthorizationError]);
+
+const WsWorkspaceSubscribeRpc = Rpc.make(WS_METHODS.workspaceSubscribe, {
+  payload: Schema.Struct({}),
+  success: WorkspaceSnapshot,
+  error: WorkspaceRpcError,
+  stream: true,
+});
+
+const WsWorkspaceSaveAreaRpc = Rpc.make(WS_METHODS.workspaceSaveArea, {
+  payload: WorkspaceSaveAreaInput,
+  success: WorkspaceArea,
+  error: WorkspaceRpcError,
+});
+
+const WsWorkspaceDeleteAreaRpc = Rpc.make(WS_METHODS.workspaceDeleteArea, {
+  payload: WorkspaceDeleteAreaInput,
+  success: Schema.Struct({}),
+  error: WorkspaceRpcError,
+});
+
+const WsWorkspaceCreateItemRpc = Rpc.make(WS_METHODS.workspaceCreateItem, {
+  payload: WorkspaceCreateItemInput,
+  success: WorkspaceItem,
+  error: WorkspaceRpcError,
+});
+
+const WsWorkspaceUpdateItemRpc = Rpc.make(WS_METHODS.workspaceUpdateItem, {
+  payload: WorkspaceUpdateItemInput,
+  success: WorkspaceItem,
+  error: WorkspaceRpcError,
+});
+
+const WsWorkspaceDeleteItemRpc = Rpc.make(WS_METHODS.workspaceDeleteItem, {
+  payload: WorkspaceDeleteItemInput,
+  success: Schema.Struct({}),
+  error: WorkspaceRpcError,
+});
+
+const WsWorkspaceFileRpc = Rpc.make(WS_METHODS.workspaceFile, {
+  payload: WorkspaceFileInput,
+  success: Schema.Struct({}),
+  error: WorkspaceRpcError,
+});
+
 const WsScheduledTasksListRpc = Rpc.make(WS_METHODS.scheduledTasksList, {
   payload: ScheduledTaskListInput,
   success: ScheduledTaskListResult,
@@ -1967,6 +2071,17 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,
+  WsProjectDocsSubscribeRpc,
+  WsProjectDocsReadRpc,
+  WsProjectDocsSaveRpc,
+  WsProjectDocsDeleteRpc,
+  WsWorkspaceSubscribeRpc,
+  WsWorkspaceSaveAreaRpc,
+  WsWorkspaceDeleteAreaRpc,
+  WsWorkspaceCreateItemRpc,
+  WsWorkspaceUpdateItemRpc,
+  WsWorkspaceDeleteItemRpc,
+  WsWorkspaceFileRpc,
   WsScheduledTasksListRpc,
   WsScheduledTasksSubscribeRpc,
   WsScheduledTasksUpsertRpc,

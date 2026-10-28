@@ -1140,6 +1140,10 @@ export function createServerEnvironmentAtoms<R, E>(
     readonly environmentId: EnvironmentId;
     readonly input: EnvironmentRpcInput<typeof WS_METHODS.subscribeServerLifecycle>;
   }) => welcomeFamily(target.environmentId);
+  const projectDocsLive = createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+    label: "environment-data:server:project-docs:live",
+    tag: WS_METHODS.projectDocsSubscribe,
+  });
   const updateSettings = createEnvironmentRpcCommand(runtime, {
     label: "environment-data:server:update-settings",
     tag: WS_METHODS.serverUpdateSettings,
@@ -1149,6 +1153,50 @@ export function createServerEnvironmentAtoms<R, E>(
 
   return {
     configValueAtom,
+    projectDocsLive,
+    // Agents edit docs too; any change to the project's doc list re-reads the open doc.
+    projectDoc: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:project-docs:read",
+      tag: WS_METHODS.projectDocsRead,
+      refreshTrigger: ({ environmentId, input }) =>
+        projectDocsLive({ environmentId, input: { projectId: input.projectId } }),
+    }),
+    saveProjectDoc: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:project-docs:save",
+      tag: WS_METHODS.projectDocsSave,
+    }),
+    deleteProjectDoc: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:project-docs:delete",
+      tag: WS_METHODS.projectDocsDelete,
+    }),
+    workspaceLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:workspace:live",
+      tag: WS_METHODS.workspaceSubscribe,
+    }),
+    saveWorkspaceArea: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:workspace:save-area",
+      tag: WS_METHODS.workspaceSaveArea,
+    }),
+    deleteWorkspaceArea: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:workspace:delete-area",
+      tag: WS_METHODS.workspaceDeleteArea,
+    }),
+    createWorkspaceItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:workspace:create-item",
+      tag: WS_METHODS.workspaceCreateItem,
+    }),
+    updateWorkspaceItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:workspace:update-item",
+      tag: WS_METHODS.workspaceUpdateItem,
+    }),
+    deleteWorkspaceItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:workspace:delete-item",
+      tag: WS_METHODS.workspaceDeleteItem,
+    }),
+    fileWorkspaceTarget: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:workspace:file",
+      tag: WS_METHODS.workspaceFile,
+    }),
     runStorageCleanup: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:run-storage-cleanup",
       tag: WS_METHODS.serverRunStorageCleanup,

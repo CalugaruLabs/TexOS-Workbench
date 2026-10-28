@@ -20,6 +20,8 @@ import type * as P from "@t3tools/provider-core/server/ProviderAdapter";
 import { NativeBridge, type NativeProvider } from "./bridge.ts";
 import { makeNativeAdapter, validateNativePolicy } from "./adapter.ts";
 
+const decodeNativeTurnItem = Schema.decodeEffect(OrchestrationV2TurnItem);
+
 const { once } = await vi.importActual<typeof import("node:events")>("node:events");
 const { PassThrough } = await vi.importActual<typeof import("node:stream")>("node:stream");
 let fixtureUUID = 0;
@@ -216,7 +218,7 @@ describe("native TexOS presentation adapter", () => {
               ).toEqual(["synthetic", "synthetic reply", "synthetic reply"]);
               expect(items.map((item) => item.status)).toEqual(["running", "running", "completed"]);
               for (const item of items) {
-                yield* Schema.decodeUnknownEffect(OrchestrationV2TurnItem)(item);
+                yield* decodeNativeTurnItem(item);
                 expect(item).toMatchObject({
                   type: "assistant_message",
                   threadId: request.threadId,

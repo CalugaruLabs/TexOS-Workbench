@@ -16,7 +16,7 @@ export const PROJECT_OVERVIEW_SECTIONS: ReadonlyArray<{
   { id: "earlier", title: "Earlier" },
 ];
 
-const SECTION_BY_PILL: Record<ThreadStatusPill["label"], ProjectOverviewSectionId> = {
+export const SECTION_BY_PILL: Record<ThreadStatusPill["label"], ProjectOverviewSectionId> = {
   "Pending Approval": "needs-you",
   "Awaiting Input": "needs-you",
   "Guest Request": "needs-you",

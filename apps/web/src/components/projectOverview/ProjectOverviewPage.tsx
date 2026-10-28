@@ -68,9 +68,21 @@ export function ProjectOverviewPage({ projectKey }: { readonly projectKey: strin
   );
 }
 
+export function useThreadAgentLabel() {
+  const providersByEnvironment = useAtomValue(environmentPresentations.providersByEnvironmentAtom);
+  return (thread: SidebarThreadSummary) => {
+    const provider = providersByEnvironment
+      .get(thread.environmentId)
+      ?.find((candidate) => candidate.instanceId === thread.providerInstanceId);
+    return provider
+      ? resolveProviderInstanceDisplayName(provider)
+      : (thread.runtime?.providerName ?? thread.providerInstanceId);
+  };
+}
+
 function ProjectOverviewBody({ project }: { readonly project: SidebarProjectSnapshot }) {
   const threads = useQuietThreadShells();
-  const providersByEnvironment = useAtomValue(environmentPresentations.providersByEnvironmentAtom);
+  const agentLabel = useThreadAgentLabel();
   const areas = useClientSettings((settings) => settings.sidebarWorkspaceAreas);
   const handleNewThread = useNewThreadHandler();
 
@@ -87,15 +99,6 @@ function ProjectOverviewBody({ project }: { readonly project: SidebarProjectSnap
     useComposerDraftStore
       .getState()
       .setPrompt(opened.draftId, projectMainChatBrief(project.displayName));
-  };
-
-  const agentLabel = (thread: SidebarThreadSummary) => {
-    const provider = providersByEnvironment
-      .get(thread.environmentId)
-      ?.find((candidate) => candidate.instanceId === thread.providerInstanceId);
-    return provider
-      ? resolveProviderInstanceDisplayName(provider)
-      : (thread.runtime?.providerName ?? thread.providerInstanceId);
   };
 
   return (
@@ -173,12 +176,14 @@ function ProjectOverviewBody({ project }: { readonly project: SidebarProjectSnap
   );
 }
 
-function OverviewThreadRow({
+export function OverviewThreadRow({
   entry,
   agent,
+  projectName,
 }: {
   readonly entry: ProjectOverviewThread;
   readonly agent: string;
+  readonly projectName?: string | undefined;
 }) {
   const { thread, pill } = entry;
   return (
@@ -196,6 +201,11 @@ function OverviewThreadRow({
           )}
         />
         <span className="min-w-0 flex-1 truncate font-medium">{thread.title}</span>
+        {projectName ? (
+          <span className="hidden max-w-40 truncate text-xs text-muted-foreground sm:inline">
+            {projectName}
+          </span>
+        ) : null}
         {pill ? <span className={cn("text-xs", pill.colorClass)}>{pill.label}</span> : null}
         <span className="max-w-32 truncate text-xs text-muted-foreground">{agent}</span>
         <span className="w-16 shrink-0 text-right text-xs text-muted-foreground tabular-nums">

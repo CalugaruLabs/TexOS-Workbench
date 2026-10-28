@@ -5,6 +5,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import type * as Scope from "effect/Scope";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ServerConfig from "../config.ts";
@@ -35,6 +36,27 @@ it.effect(
         Effect.scoped,
       );
       expect(probes).toBe(0);
-      expect(Context.getOption(built, OpenCodeRuntime.OpenCodeRuntime)._tag).toBe("None");
+      const runtime = Context.get(built, OpenCodeRuntime.OpenCodeRuntime);
+      const denied: ReadonlyArray<
+        Effect.Effect<unknown, OpenCodeRuntime.OpenCodeRuntimeError, Scope.Scope>
+      > = [
+        runtime.startOpenCodeServerProcess({
+          binaryPath: "/synthetic/opencode",
+          directory: "/synthetic",
+        }),
+        runtime.connectToOpenCodeServer({
+          binaryPath: "/synthetic/opencode",
+          directory: "/synthetic",
+        }),
+        runtime.runOpenCodeCommand({ binaryPath: "/synthetic/opencode", args: ["--version"] }),
+        runtime.loadInventoryFromCli({ binaryPath: "/synthetic/opencode", cwd: "/synthetic" }),
+        runtime.loadSkillsFromCli({ binaryPath: "/synthetic/opencode", cwd: "/synthetic" }),
+      ];
+      for (const request of denied)
+        expect((yield* Effect.scoped(request).pipe(Effect.exit))._tag).toBe("Failure");
+      expect(() =>
+        runtime.createOpenCodeSdkClient({ baseUrl: "http://127.0.0.1:1", directory: "/synthetic" }),
+      ).toThrow("unavailable");
+      expect(probes).toBe(0);
     }).pipe(Effect.provide(NodeServices.layer)),
 );

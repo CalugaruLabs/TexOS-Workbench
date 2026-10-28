@@ -16,19 +16,33 @@ const denied = (operation: string) =>
 const layerNative = Layer.succeed(
   OpenCodeRuntime.OpenCodeRuntime,
   OpenCodeRuntime.OpenCodeRuntime.of({
-    startOpenCodeServerProcess: () => denied("start"),
-    connectToOpenCodeServer: () => denied("connect"),
-    runOpenCodeCommand: () => denied("command"),
+    startOpenCodeServerProcess: Effect.fn("nativeTexos.OpenCodeRuntime.startOpenCodeServerProcess")(
+      () => denied("start"),
+    ),
+    connectToOpenCodeServer: Effect.fn("nativeTexos.OpenCodeRuntime.connectToOpenCodeServer")(() =>
+      denied("connect"),
+    ),
+    runOpenCodeCommand: Effect.fn("nativeTexos.OpenCodeRuntime.runOpenCodeCommand")(() =>
+      denied("command"),
+    ),
     createOpenCodeSdkClient: () => {
       throw new OpenCodeRuntime.OpenCodeRuntimeError({
         operation: "create-sdk-client",
         detail: "OpenCode SDK access is unavailable in native TexOS presentation.",
       });
     },
-    loadOpenCodeInventory: () => denied("inventory"),
-    loadOpenCodeSkills: () => denied("skills"),
-    loadInventoryFromCli: () => denied("cli-inventory"),
-    loadSkillsFromCli: () => denied("cli-skills"),
+    loadOpenCodeInventory: Effect.fn("nativeTexos.OpenCodeRuntime.loadOpenCodeInventory")(() =>
+      denied("inventory"),
+    ),
+    loadOpenCodeSkills: Effect.fn("nativeTexos.OpenCodeRuntime.loadOpenCodeSkills")(() =>
+      denied("skills"),
+    ),
+    loadInventoryFromCli: Effect.fn("nativeTexos.OpenCodeRuntime.loadInventoryFromCli")(() =>
+      denied("cli-inventory"),
+    ),
+    loadSkillsFromCli: Effect.fn("nativeTexos.OpenCodeRuntime.loadSkillsFromCli")(() =>
+      denied("cli-skills"),
+    ),
   }),
 );
 

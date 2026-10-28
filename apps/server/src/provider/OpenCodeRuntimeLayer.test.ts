@@ -54,9 +54,17 @@ it.effect(
       ];
       for (const request of denied)
         expect((yield* Effect.scoped(request).pipe(Effect.exit))._tag).toBe("Failure");
-      expect(() =>
-        runtime.createOpenCodeSdkClient({ baseUrl: "http://127.0.0.1:1", directory: "/synthetic" }),
-      ).toThrow("unavailable");
+      let sdkFailure: unknown;
+      try {
+        runtime.createOpenCodeSdkClient({ baseUrl: "http://127.0.0.1:1", directory: "/synthetic" });
+      } catch (error) {
+        sdkFailure = error;
+      }
+      expect(sdkFailure).toBeInstanceOf(OpenCodeRuntime.OpenCodeRuntimeError);
+      expect(sdkFailure).toMatchObject({
+        operation: "create-sdk-client",
+        detail: "OpenCode SDK access is unavailable in native TexOS presentation.",
+      });
       expect(probes).toBe(0);
     }).pipe(Effect.provide(NodeServices.layer)),
 );

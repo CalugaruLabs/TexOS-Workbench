@@ -75,7 +75,14 @@ it.effect(
           installedVersion: null,
           executablePath: null,
         });
-        const denied: ReadonlyArray<Effect.Effect<unknown, unknown, Scope.Scope>> = [
+        const denied: ReadonlyArray<
+          Effect.Effect<
+            unknown,
+            | CodexInstallation.CodexInstallationError
+            | AntigravityInstallation.AntigravityInstallationError,
+            Scope.Scope
+          >
+        > = [
           installer.resolve(),
           installer.acquire(),
           installer.start,
@@ -113,9 +120,10 @@ it.effect(
       expect(probes).toEqual([]);
     }).pipe(
       Effect.provide(
-        ServerConfig.layerTest("/synthetic/native", { prefix: "native-startup-guards-" }),
+        ServerConfig.layerTest("/synthetic/native", { prefix: "native-startup-guards-" }).pipe(
+          Layer.provideMerge(NodeServices.layer),
+        ),
       ),
-      Effect.provide(NodeServices.layer),
       Effect.scoped,
     ),
 );

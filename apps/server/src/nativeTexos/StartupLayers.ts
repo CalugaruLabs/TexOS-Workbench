@@ -37,11 +37,11 @@ const layerNativeInstallations = Layer.mergeAll(
     CodexInstallation.CodexInstallation,
     CodexInstallation.CodexInstallation.of({
       managedDirectory: "",
-      resolve: () => codexDenied("resolve"),
-      acquire: () => codexDenied("acquire"),
+      resolve: Effect.fn("nativeTexos.CodexInstallation.resolve")(() => codexDenied("resolve")),
+      acquire: Effect.fn("nativeTexos.CodexInstallation.acquire")(() => codexDenied("acquire")),
       start: codexDenied("start"),
-      cancel: () => codexDenied("cancel"),
-      remove: () => codexDenied("remove"),
+      cancel: Effect.fn("nativeTexos.CodexInstallation.cancel")(() => codexDenied("cancel")),
+      remove: Effect.fn("nativeTexos.CodexInstallation.remove")(() => codexDenied("remove")),
       state: Effect.succeed(installState("codex")),
       changes: Stream.succeed(installState("codex")),
     }),
@@ -50,11 +50,19 @@ const layerNativeInstallations = Layer.mergeAll(
     AntigravityInstallation.AntigravityInstallation,
     AntigravityInstallation.AntigravityInstallation.of({
       managedDirectory: "",
-      resolve: () => antigravityDenied("resolve"),
-      acquire: () => antigravityDenied("acquire"),
+      resolve: Effect.fn("nativeTexos.AntigravityInstallation.resolve")(() =>
+        antigravityDenied("resolve"),
+      ),
+      acquire: Effect.fn("nativeTexos.AntigravityInstallation.acquire")(() =>
+        antigravityDenied("acquire"),
+      ),
       start: antigravityDenied("start"),
-      cancel: () => antigravityDenied("cancel"),
-      remove: () => antigravityDenied("remove"),
+      cancel: Effect.fn("nativeTexos.AntigravityInstallation.cancel")(() =>
+        antigravityDenied("cancel"),
+      ),
+      remove: Effect.fn("nativeTexos.AntigravityInstallation.remove")(() =>
+        antigravityDenied("remove"),
+      ),
       state: Effect.succeed(installState("antigravity")),
       changes: Stream.succeed(installState("antigravity")),
     }),
@@ -90,9 +98,11 @@ const layerNativeTelemetry = Layer.succeed(
   NativeTelemetryClient.NativeTelemetryClient.of({
     capabilities: telemetryDenied,
     snapshots: Stream.empty,
-    readHistory: () => telemetryDenied,
-    setExternalProcesses: () => telemetryDenied,
-    setHostPowerState: () => telemetryDenied,
+    readHistory: Effect.fn("nativeTexos.telemetry.readHistory")(() => telemetryDenied),
+    setExternalProcesses: Effect.fn("nativeTexos.telemetry.setExternalProcesses")(
+      () => telemetryDenied,
+    ),
+    setHostPowerState: Effect.fn("nativeTexos.telemetry.setHostPowerState")(() => telemetryDenied),
     sampleNow: telemetryDenied,
     processTable: telemetryDenied,
     retry: Effect.succeed(false),

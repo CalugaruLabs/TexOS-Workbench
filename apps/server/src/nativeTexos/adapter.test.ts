@@ -3,6 +3,7 @@ import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import * as DateTime from "effect/DateTime";
+import * as Schema from "effect/Schema";
 import {
   ThreadId,
   ProjectId,
@@ -12,6 +13,7 @@ import {
   RunAttemptId,
   NodeId,
   MessageId,
+  OrchestrationV2TurnItem,
   type OrchestrationV2AppThread,
 } from "@t3tools/contracts";
 import type * as P from "@t3tools/provider-core/server/ProviderAdapter";
@@ -185,19 +187,51 @@ describe("native TexOS presentation adapter", () => {
                 provider,
               );
               f.event(1, "text", { text: "synthetic" });
-              f.event(2, "completed");
-              const events = yield* runtime.events.pipe(Stream.take(6), Stream.runCollect);
+              f.event(2, "text", { text: " reply" });
+              f.event(3, "completed");
+              const events = yield* runtime.events.pipe(
+                Stream.takeUntil((event) => event.type === "turn.terminal"),
+                Stream.runCollect,
+              );
               expect(events.map((e) => e.type)).toEqual([
                 "provider_turn.updated",
                 "provider_turn.updated",
                 "message.updated",
+                "turn_item.updated",
                 "message.updated",
+                "turn_item.updated",
+                "message.updated",
+                "turn_item.updated",
                 "provider_turn.updated",
                 "turn.terminal",
               ]);
               expect(events.at(-1)).toMatchObject({ status: "completed", failure: null });
+              const items = events.flatMap((event) =>
+                event.type === "turn_item.updated" ? [event.turnItem] : [],
+              );
+              expect(items).toHaveLength(3);
+              expect(new Set(items.map((item) => item.id)).size).toBe(1);
+              expect(
+                items.map((item) => (item.type === "assistant_message" ? item.text : null)),
+              ).toEqual(["synthetic", "synthetic reply", "synthetic reply"]);
+              expect(items.map((item) => item.status)).toEqual(["running", "running", "completed"]);
+              for (const item of items) {
+                yield* Schema.decodeUnknownEffect(OrchestrationV2TurnItem)(item);
+                expect(item).toMatchObject({
+                  type: "assistant_message",
+                  threadId: request.threadId,
+                  runId: request.runId,
+                  nodeId: request.rootNodeId,
+                  providerThreadId: thread.id,
+                  providerTurnId: `native-texos:${request.attemptId}`,
+                  messageId: `native-texos:${request.attemptId}`,
+                });
+              }
+              expect(items[0]).toMatchObject({ streaming: true, completedAt: null });
+              expect(items.at(-1)).toMatchObject({ streaming: false });
+              expect(items.at(-1)?.completedAt).not.toBeNull();
               const snapshot = yield* runtime.readThreadSnapshot({ providerThread: thread });
-              expect(snapshot.messages.map((m) => m.text)).toEqual(["synthetic"]);
+              expect(snapshot.messages.map((m) => m.text)).toEqual(["synthetic reply"]);
               expect(snapshot.providerThread.nativeThreadRef).toBeNull();
               expect((yield* Effect.exit(runtime.startTurn(request)))._tag).toBe("Failure");
               expect(
@@ -248,8 +282,14 @@ describe("native TexOS presentation adapter", () => {
                 remoteCancellationConfirmed: false,
                 localCleanupConfirmed: true,
               });
-              const events = yield* runtime.events.pipe(Stream.take(3), Stream.runCollect);
+              const events = yield* runtime.events.pipe(
+                Stream.takeUntil((event) => event.type === "turn.terminal"),
+                Stream.runCollect,
+              );
               expect(events.at(-1)).toMatchObject({ type: "turn.terminal", status: "interrupted" });
+              expect(events.find((event) => event.type === "turn_item.updated")).toMatchObject({
+                turnItem: { type: "assistant_message", status: "interrupted", streaming: false },
+              });
             }),
           );
         } finally {
@@ -315,7 +355,13 @@ describe("native TexOS presentation adapter", () => {
             const ended = once(f.input, "end");
             f.input.end();
             yield* Effect.promise(() => ended);
-            const events = yield* runtime.events.pipe(Stream.take(5), Stream.runCollect);
+            const events = yield* runtime.events.pipe(
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runCollect,
+            );
+            expect(events.find((event) => event.type === "turn_item.updated")).toMatchObject({
+              turnItem: { type: "assistant_message", status: "failed", streaming: false },
+            });
             expect(events.at(-1)).toMatchObject({
               type: "turn.terminal",
               status: "failed",
@@ -389,7 +435,10 @@ it.effect.each([true, false])("retains pre-ACK Stop exactly once, accepted ACK=%
               remoteCancellationConfirmed: false,
               localCleanupConfirmed: true,
             });
-            const terminal = yield* runtime.events.pipe(Stream.take(4), Stream.runCollect);
+            const terminal = yield* runtime.events.pipe(
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runCollect,
+            );
             expect(terminal.at(-1)).toMatchObject({
               type: "turn.terminal",
               status: "interrupted",
@@ -401,4 +450,53 @@ it.effect.each([true, false])("retains pre-ACK Stop exactly once, accepted ACK=%
       f.bridge.close();
     }
   }),
+);
+
+it.effect.each(["failed", "interrupted", "uncertain"] as const)(
+  "settles the same visible partial assistant item on native %s",
+  (phase) =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => fixture("codex")),
+      (f) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const runtime = yield* f.adapter.openSession(f.sessionInput);
+            const thread = yield* runtime.ensureThread(f.sessionInput);
+            yield* runtime.startTurn(f.turn(thread));
+            f.event(1, "text", { text: "partial native reply" });
+            f.event(2, phase);
+            const events = yield* runtime.events.pipe(
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runCollect,
+            );
+            const items = events.flatMap((event) =>
+              event.type === "turn_item.updated" ? [event.turnItem] : [],
+            );
+            expect(items).toHaveLength(2);
+            expect(items[1]?.id).toBe(items[0]?.id);
+            expect(items[0]).toMatchObject({
+              type: "assistant_message",
+              text: "partial native reply",
+              streaming: true,
+              status: "running",
+              completedAt: null,
+            });
+            expect(items[1]).toMatchObject({
+              type: "assistant_message",
+              text: "partial native reply",
+              streaming: false,
+              status: phase === "interrupted" ? "interrupted" : "failed",
+            });
+            expect(items[1]?.completedAt).not.toBeNull();
+            expect(events.at(-1)).toMatchObject({
+              type: "turn.terminal",
+              status: phase === "interrupted" ? "interrupted" : "failed",
+            });
+            expect(f.requests.filter((request) => request.method === "message.send")).toHaveLength(
+              1,
+            );
+          }),
+        ),
+      (f) => Effect.sync(() => f.bridge.close()),
+    ),
 );

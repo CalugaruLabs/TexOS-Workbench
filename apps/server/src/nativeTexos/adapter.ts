@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import {
   MessageId,
+  TurnItemId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
@@ -10,6 +11,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2ConversationMessage,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -231,6 +233,33 @@ export function makeNativeAdapter(
         }
         return turn.stopPromise;
       };
+      // Messages persist the conversation body; turn items are the live timeline
+      // contract. Keep one stable item bound to the same native run/turn/message.
+      const emitAssistant = (turn: ActiveNativeTurn) => {
+        const item: Extract<OrchestrationV2TurnItem, { type: "assistant_message" }> = {
+          id: TurnItemId.make(`native-texos:assistant:${turn.input.attemptId}`),
+          threadId: turn.message.threadId,
+          runId: turn.message.runId,
+          nodeId: turn.message.nodeId,
+          providerThreadId: turn.turn.providerThreadId,
+          providerTurnId: turn.turn.id,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          status: turn.turn.status,
+          title: null,
+          startedAt: turn.turn.startedAt,
+          completedAt: turn.turn.completedAt,
+          updatedAt: turn.message.updatedAt,
+          type: "assistant_message",
+          messageId: turn.message.id,
+          text: turn.message.text,
+          attachments: [],
+          streaming: turn.message.streaming,
+        };
+        emit({ type: "message.updated", driver, message: turn.message });
+        emit({ type: "turn_item.updated", driver, turnItem: item });
+      };
       const consume = (event: NativeEvent) => {
         if (!active || event.handle !== handle) return;
         if (!active.nativeTurn) {
@@ -259,7 +288,7 @@ export function makeNativeAdapter(
             bridge.close();
             return;
           }
-          emit({ type: "message.updated", driver, message: active.message });
+          emitAssistant(active);
         }
         if (["completed", "failed", "interrupted", "uncertain"].includes(event.phase)) {
           const uncertain = event.phase === "uncertain";
@@ -272,7 +301,7 @@ export function makeNativeAdapter(
           };
           messages.push(active.message);
           turns.push(active.turn);
-          emit({ type: "message.updated", driver, message: active.message });
+          emitAssistant(active);
           emit({ type: "provider_turn.updated", driver, providerTurn: active.turn });
           const terminal = {
             type: "turn.terminal" as const,

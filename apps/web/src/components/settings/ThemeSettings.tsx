@@ -23,6 +23,7 @@ import {
   type ThemeDefinition,
   type ThemeHalves,
   T3_CHAT_THEME,
+  TEXOS_THEME,
   EMBER_THEME,
   GROVE_THEME,
   IRIS_THEME,
@@ -55,6 +56,7 @@ import {
 import { ThemeWireframe } from "./ThemeWireframe";
 
 const MAINTAINER_THEMES: ReadonlyArray<ThemeDefinition> = [
+  TEXOS_THEME,
   T3_CHAT_THEME,
   GROVE_THEME,
   OCEAN_THEME,

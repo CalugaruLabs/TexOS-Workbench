@@ -1,3 +1,4 @@
+import { isNativeTexos } from "./nativeTexos/profile.ts";
 import {
   CommandId,
   DEFAULT_MODEL,
@@ -545,17 +546,17 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       recover: runStartupPhase("orchestration-v2.recovery", providerRuntimeRecovery.recover),
       recoverDelegatedTasks: runStartupPhase(
         "orchestration-v2.delegated-tasks.recover",
-        orchestrator.recoverDelegatedTasks,
+        isNativeTexos() ? Effect.void : orchestrator.recoverDelegatedTasks,
       ),
       startEffectWorker: runStartupPhase(
         "orchestration-v2.effect-worker.start",
         startEffectWorkerWithRelay({
           runWorker: EffectWorker.runDaemon,
-          startRelay: agentAwarenessRelay.start(),
+          startRelay: isNativeTexos() ? Effect.void : agentAwarenessRelay.start(),
           workerFiberRef: effectWorkerFiber,
         }),
       ),
-      autoBootstrap: (serverConfig.autoBootstrapProjectFromCwd
+      autoBootstrap: (serverConfig.autoBootstrapProjectFromCwd && !isNativeTexos()
         ? runStartupPhase(
             "welcome.autobootstrap",
             resolveAutoBootstrapWelcomeTargets.pipe(Effect.provideService(Crypto.Crypto, crypto)),
@@ -571,7 +572,7 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       Effect.gen(function* () {
         const projects = yield* (yield* ProjectStore.ProjectStoreV2).listShells();
         const settings = yield* serverSettings.getSettings;
-        yield* autoPullProjects(projects, settings);
+        if (!isNativeTexos()) yield* autoPullProjects(projects, settings);
       }),
     ).pipe(
       Effect.catch((cause) =>

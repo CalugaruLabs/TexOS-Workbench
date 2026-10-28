@@ -1,3 +1,4 @@
+import { isNativeTexos } from "./nativeTexos/profile.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -92,7 +93,7 @@ import {
   EnvironmentAuthorizationError,
   type ProjectId,
   type ProviderDriverKind,
-  type ProviderInstanceId,
+  ProviderInstanceId,
   ThreadId,
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
@@ -315,6 +316,7 @@ export const withLateEditorConfig = <E, R>(
   liveUpdates: Stream.Stream<ServerConfigStreamEvent, E, R>,
   launcher: EditorDiscovery,
 ) => {
+  if (isNativeTexos()) return liveUpdates;
   const lateEditorConfig = Stream.fromEffect(launcher.resolveAvailableEditors()).pipe(
     Stream.filter(
       (editors) =>
@@ -1742,26 +1744,34 @@ export const layerWsRpc = (
         );
         const environment = yield* serverEnvironment.getDescriptor;
         const auth = yield* serverAuth.getDescriptor();
-        const scratchWorkspaceRoot = yield* managedFolders.scratchRoot;
+        const scratchWorkspaceRoot = isNativeTexos()
+          ? Option.none<string>()
+          : yield* managedFolders.scratchRoot;
         const lastEventLoopStall = yield* eventLoopMonitor.latestNoticeableStall;
-        const editorConfig = yield* resolveEditorConfig(
-          yield* resolveAvailableEditorsForConfig(externalLauncher.resolveAvailableEditors()),
-          resolveFileManagerRevealKindForConfig(externalLauncher.resolveFileManagerRevealKind()),
-        );
+        const editorConfig = isNativeTexos()
+          ? { availableEditors: [] }
+          : yield* resolveEditorConfig(
+              yield* resolveAvailableEditorsForConfig(externalLauncher.resolveAvailableEditors()),
+              resolveFileManagerRevealKindForConfig(
+                externalLauncher.resolveFileManagerRevealKind(),
+              ),
+            );
 
         return {
           environment,
           auth,
-          cwd: config.cwd,
+          cwd: isNativeTexos() ? "/__texos_native_preview__" : config.cwd,
           keybindingsConfigPath: config.keybindingsConfigPath,
           keybindings: keybindingsConfig.keybindings,
           issues: keybindingsConfig.issues,
           providers,
           ...editorConfig,
-          remoteOpenTargets: yield* resolveAvailableEditorsForConfig(
-            remoteOpenTargets.resolveTargets(),
-          ),
-          directEndpoints: yield* resolveAvailableEditorsForConfig(directEndpoints.resolve()),
+          remoteOpenTargets: isNativeTexos()
+            ? []
+            : yield* resolveAvailableEditorsForConfig(remoteOpenTargets.resolveTargets()),
+          directEndpoints: isNativeTexos()
+            ? []
+            : yield* resolveAvailableEditorsForConfig(directEndpoints.resolve()),
           observability: {
             logsDirectoryPath: config.logsDir,
             localTracingEnabled: true,
@@ -1790,7 +1800,16 @@ export const layerWsRpc = (
               : {}),
             otlpLogsEnabled: config.otlpLogsUrl !== undefined,
           },
-          settings,
+          settings: isNativeTexos()
+            ? {
+                ...settings,
+                defaultRuntimeMode: "approval-required" as const,
+                defaultModelSelection: {
+                  instanceId: ProviderInstanceId.make("codex"),
+                  model: "native-settings",
+                },
+              }
+            : settings,
           shellResumeCompletionMarker: true,
           shellThreadFamilies: true,
           shellOlderSettled: true,
@@ -1802,7 +1821,9 @@ export const layerWsRpc = (
             onNone: () => ({}),
             onSome: (root) => ({ scratchWorkspaceRoot: root }),
           }),
-          newProjectsRoot: managedFolders.namedProjectsRoot,
+          newProjectsRoot: isNativeTexos()
+            ? "/__texos_native_preview__"
+            : managedFolders.namedProjectsRoot,
           ...(lastEventLoopStall === undefined ? {} : { lastEventLoopStall }),
         };
       });
@@ -2542,7 +2563,21 @@ export const layerWsRpc = (
         [WS_METHODS.serverGetStorageCleanupReport]: () => storageCleanup.reports,
         [WS_METHODS.serverGetDatabaseStorage]: () => databaseStorage.status,
         [WS_METHODS.serverGetSettings]: (_input) =>
-          serverSettings.getSettings.pipe(Effect.map(ServerSettings.redactServerSettingsForClient)),
+          serverSettings.getSettings.pipe(
+            Effect.map((settings) => {
+              const redacted = ServerSettings.redactServerSettingsForClient(settings);
+              return isNativeTexos()
+                ? {
+                    ...redacted,
+                    defaultRuntimeMode: "approval-required" as const,
+                    defaultModelSelection: {
+                      instanceId: ProviderInstanceId.make("codex"),
+                      model: "native-settings",
+                    },
+                  }
+                : redacted;
+            }),
+          ),
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {
@@ -3198,7 +3233,19 @@ export const layerWsRpc = (
                     )
                   : Stream.empty;
               const settingsUpdates = settingsChanges.pipe(
-                Stream.map((settings) => ServerSettings.redactServerSettingsForClient(settings)),
+                Stream.map((settings) => {
+                  const redacted = ServerSettings.redactServerSettingsForClient(settings);
+                  return isNativeTexos()
+                    ? {
+                        ...redacted,
+                        defaultRuntimeMode: "approval-required" as const,
+                        defaultModelSelection: {
+                          instanceId: ProviderInstanceId.make("codex"),
+                          model: "native-settings",
+                        },
+                      }
+                    : redacted;
+                }),
                 Stream.map((settings) => ({
                   version: 1 as const,
                   type: "settingsUpdated" as const,

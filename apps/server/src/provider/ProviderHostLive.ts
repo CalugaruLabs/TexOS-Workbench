@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { ProviderCredentialError } from "@t3tools/provider-core/server/errors";
 import * as Crypto from "effect/Crypto";
@@ -47,6 +48,10 @@ export const layer = Layer.effect(
         Effect.provideService(FileSystem.FileSystem, fileSystem),
       ),
       credentials: Effect.fn("ProviderHost.credentials")(function (namespace, bindingId) {
+        if (isNativeTexos())
+          return Effect.die(
+            new Error("Native TexOS presentation cannot access T3 provider credentials."),
+          );
         return ProviderCredentialStore.make(namespace, bindingId).pipe(
           Effect.map((store) => ({
             binding: store.binding,

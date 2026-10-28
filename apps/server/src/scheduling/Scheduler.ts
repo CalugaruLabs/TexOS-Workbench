@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -19,6 +20,8 @@ export class Scheduler extends Context.Service<
 >()("t3/scheduling/Scheduler") {}
 
 const make = Effect.gen(function* () {
+  if (isNativeTexos())
+    return Scheduler.of({ register: Effect.fn("Scheduler.register")(() => Effect.void) });
   const sources = yield* Ref.make(new Map<symbol, Effect.Effect<void>>());
   const register: Scheduler["Service"]["register"] = Effect.fn("Scheduler.register")(function* <
     E,

@@ -1,3 +1,4 @@
+import { isNativeTexos } from "./nativeTexos/profile.ts";
 import {
   GitCommandError,
   OrchestrationV2AppThreadJson,
@@ -205,6 +206,13 @@ export class StorageCleanup extends Context.Service<
 >()("t3/storageCleanup") {}
 
 const make = Effect.gen(function* () {
+  if (isNativeTexos())
+    return StorageCleanup.of({
+      runNow: Effect.die(new Error("Storage cleanup is disabled in native chat presentation.")),
+      latestReport: Effect.succeed(null),
+      reports: Stream.never,
+      drain: Effect.void,
+    });
   const config = yield* ServerConfig.ServerConfig;
   const settingsService = yield* Settings.ServerSettingsService;
   const projectStore = yield* ProjectStore.ProjectStoreV2;
@@ -1267,7 +1275,7 @@ const make = Effect.gen(function* () {
       ),
     );
   });
-  yield* start();
+  if (!isNativeTexos()) yield* start();
   return StorageCleanup.of({
     runNow,
     latestReport: SubscriptionRef.get(reportRef),

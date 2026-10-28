@@ -93,10 +93,14 @@ const layerTestFor = (
     | ProjectFaviconResolver.ProjectFaviconResolver
     | RepositoryIdentityResolver.RepositoryIdentityResolver
   >,
+  workspaceLayer: Layer.Layer<WorkspacePaths.WorkspacePaths> = layerWorkspacePaths,
 ) =>
   RuntimeLayer.layerProjectService.pipe(
+    // layerProjectService privately provides ProjectStore. Expose the same layer/database
+    // to tests that verify persisted shell rows, not only the public service projection.
+    Layer.provideMerge(ProjectStore.layer),
     Layer.provideMerge(ProjectEnrichmentService.layer),
-    Layer.provideMerge(layerWorkspacePaths),
+    Layer.provideMerge(workspaceLayer),
     Layer.provideMerge(projectMetadataLayer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provideMerge(ServerSettings.layerTest()),
@@ -737,4 +741,64 @@ it.effect("rejects an update that waited on the lock while its project was delet
       "Update race",
     );
   }).pipe(Effect.provide(layerProjectServiceDependencies)),
+);
+
+it.effect(
+  "native packed startup persists one synthetic project without a folder chooser, filesystem probe, Git or setup",
+  () => {
+    const previous = process.env.T3CODE_TEXOS_NATIVE_BRIDGE;
+    let forbiddenReads = 0;
+    const forbidden = () =>
+      Effect.sync(() => {
+        forbiddenReads += 1;
+        throw new Error("Native preview must not inspect a workspace");
+      });
+    const noWorkspace = Layer.succeed(WorkspacePaths.WorkspacePaths, {
+      normalizeWorkspaceRoot: () => forbidden(),
+      resolveRelativePathWithinRoot: () => forbidden(),
+    });
+    const noMetadata = Layer.merge(
+      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+        resolve: () => forbidden(),
+      }),
+      Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        invalidate: () => forbidden(),
+        resolvePath: () => forbidden(),
+      }),
+    );
+    return Effect.acquireUseRelease(
+      Effect.sync(() => {
+        process.env.T3CODE_TEXOS_NATIVE_BRIDGE = "1";
+      }),
+      () =>
+        Effect.gen(function* () {
+          const service = yield* ProjectService.ProjectService;
+          const store = yield* ProjectStore.ProjectStoreV2;
+          // This is the actual database projection consumed by subscribeShell and the index draft landing.
+          const persisted = yield* store.listShells();
+          assert.equal(persisted.length, 1);
+          assert.equal(persisted[0]?.id, "native-texos-preview");
+          assert.equal(persisted[0]?.title, "Native TexOS Chat Preview · Synthetic");
+          const snapshot = yield* service.snapshot;
+          const project = snapshot.projects[0]!;
+          assert.equal(project.workspaceRoot, "/__texos_native_preview__");
+          assert.equal(project.defaultThreadEnvMode, "local");
+          assert.deepEqual(project.defaultModelSelection, {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "native-settings",
+          });
+          assert.deepEqual(project.scripts, []);
+          assert.isFalse(project.autoPull);
+          assert.isNull(project.repositoryIdentity);
+          assert.isNull(project.faviconPath);
+          assert.equal((yield* service.listShells()).length, 1);
+          assert.equal(forbiddenReads, 0);
+        }).pipe(Effect.provide(layerTestFor(noMetadata, noWorkspace))),
+      () =>
+        Effect.sync(() => {
+          if (previous === undefined) delete process.env.T3CODE_TEXOS_NATIVE_BRIDGE;
+          else process.env.T3CODE_TEXOS_NATIVE_BRIDGE = previous;
+        }),
+    );
+  },
 );

@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -415,7 +416,7 @@ export const layerWithOptions = (
         threadId: ThreadId,
         providerInstanceId: ProviderInstanceId,
       ): Effect.Effect<PreparedMcpCredential> =>
-        options.configureMcp === false
+        isNativeTexos() || options.configureMcp === false
           ? mcpSessions
               .clear(threadId)
               .pipe(Effect.as<PreparedMcpCredential>({ mcpCredentialId: undefined, issued: false }))
@@ -2052,7 +2053,7 @@ export const layerWithOptions = (
             input.providerSessionId,
             Effect.gen(function* () {
               const cwd = input.runtimePolicy.cwd;
-              if (cwd !== null) {
+              if (!isNativeTexos() && cwd !== null) {
                 const workspaceIsDirectory = yield* fileSystem.stat(cwd).pipe(
                   Effect.map((stat) => stat.type === "Directory"),
                   Effect.catch((error) => Effect.succeed(error.reason._tag !== "NotFound")),

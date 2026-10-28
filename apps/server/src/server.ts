@@ -1,3 +1,5 @@
+import { isNativeTexos, nativeHttpAllowed, nativeStartupProblem } from "./nativeTexos/profile.ts";
+import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Random from "effect/Random";
@@ -528,19 +530,32 @@ const layerOrchestrationApplication = CheckpointDiffQuery.layer.pipe(
 );
 
 const layerThreadSettlementWorker = Layer.effectDiscard(
-  ThreadSettlementService.make.pipe(Effect.flatMap((service) => service.start())),
+  Effect.suspend(() =>
+    isNativeTexos()
+      ? Effect.void
+      : ThreadSettlementService.make.pipe(Effect.flatMap((service) => service.start())),
+  ),
 ).pipe(Layer.provide(layerPullRequestService), Layer.provide(ProjectionStoreV2.layer));
 
 const layerIdleCompactionWorker = Layer.effectDiscard(
-  IdleCompactionService.make.pipe(Effect.flatMap((service) => service.start())),
+  Effect.suspend(() =>
+    isNativeTexos()
+      ? Effect.void
+      : IdleCompactionService.make.pipe(Effect.flatMap((service) => service.start())),
+  ),
 ).pipe(Layer.provide(ProjectionStoreV2.layer));
 
 const layerThreadPullRequestWorker = Layer.effectDiscard(
-  ThreadPullRequestService.make.pipe(Effect.flatMap((service) => service.start())),
+  Effect.suspend(() =>
+    isNativeTexos()
+      ? Effect.void
+      : ThreadPullRequestService.make.pipe(Effect.flatMap((service) => service.start())),
+  ),
 ).pipe(Layer.provide(layerPullRequestService));
 
 const layerProviderInstallationRefresh = Layer.effectDiscard(
   Effect.gen(function* () {
+    if (isNativeTexos()) return;
     const antigravity = yield* AntigravityInstallation.AntigravityInstallation;
     const codex = yield* CodexInstallation.CodexInstallation;
     const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
@@ -573,7 +588,7 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   AgentAwarenessRelay.layer,
-  HeldHooksWaker.layer,
+  Layer.suspend(() => (isNativeTexos() ? Layer.empty : HeldHooksWaker.layer)),
   layerThreadSettlementWorker,
   layerIdleCompactionWorker,
   StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
@@ -584,9 +599,10 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     ),
   ),
   layerThreadPullRequestWorker,
-  DelegatedTaskAnalytics.layer,
+  Layer.suspend(() => (isNativeTexos() ? Layer.empty : DelegatedTaskAnalytics.layer)),
   Layer.effectDiscard(
     Effect.gen(function* () {
+      if (isNativeTexos()) return;
       const service = yield* PullRequestSyncReactor.PullRequestSyncReactor;
       yield* service.start();
     }),
@@ -597,6 +613,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ),
   Layer.effectDiscard(
     Effect.gen(function* () {
+      if (isNativeTexos()) return;
       const service = yield* PullRequestWatchReactor.PullRequestWatchReactor;
       yield* service.start();
     }),
@@ -607,14 +624,17 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ),
   Layer.effectDiscard(
     Effect.gen(function* () {
+      if (isNativeTexos()) return;
       const service = yield* DelegatedTaskQuestionReactor.DelegatedTaskQuestionReactor;
       yield* service.start();
     }),
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
   ProviderUsageLimitsIngestion.layer,
   layerProviderInstallationRefresh,
-  ReplayMarkers.layer,
-  Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
+  Layer.suspend(() => (isNativeTexos() ? Layer.empty : ReplayMarkers.layer)),
+  Layer.effectDiscard(
+    Effect.suspend(() => (isNativeTexos() ? Effect.void : ProjectSettingsOverrideSweep.sweep)),
+  ),
 ).pipe(
   Layer.provideMerge(layerOrchestrationApplication),
   Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
@@ -696,9 +716,13 @@ const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
 
 const layerCommandReadiness = HttpRouter.middleware(
   (httpEffect) =>
-    Effect.flatMap(ServerRuntimeStartup.ServerRuntimeStartup, (startup) =>
-      startup.awaitCommandReady.pipe(Effect.orDie, Effect.andThen(httpEffect)),
-    ),
+    Effect.gen(function* () {
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      if (isNativeTexos() && !nativeHttpAllowed(request.method, request.url))
+        return HttpServerResponse.text("Unsupported in native TexOS chat preview", { status: 403 });
+      const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
+      return yield* startup.awaitCommandReady.pipe(Effect.orDie, Effect.andThen(httpEffect));
+    }),
   { global: true },
 );
 
@@ -752,6 +776,10 @@ const layerMakeRoutes = Layer.mergeAll(
 const layerMakeServer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+    if (isNativeTexos()) {
+      const problem = nativeStartupProblem(config);
+      if (problem) return yield* Effect.die(new Error(problem));
+    }
     // Before anything opens the database: one server per T3 home.
     const ownership = yield* ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath);
     const activation = yield* Deferred.make<void>();
@@ -852,6 +880,10 @@ const layerMakeServer = Layer.unwrap(
       : Layer.empty;
     const layerCloudDesiredLinkReconcile = Layer.effectDiscard(
       Effect.gen(function* () {
+        if (isNativeTexos()) {
+          yield* Deferred.succeed(cloudLinkParked, undefined);
+          return;
+        }
         const cloudLink = yield* CloudLink.CloudLink;
         const releaseManagedTunnel = cloudLink.releaseManagedTunnelOnShutdown().pipe(
           Effect.timeout("10 seconds"),

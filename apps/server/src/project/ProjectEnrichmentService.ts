@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import type { RepositoryIdentity } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -85,6 +86,21 @@ interface EnrichmentWorkLane {
 export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
   options: ProjectEnrichmentServiceOptions = {},
 ) {
+  if (isNativeTexos()) {
+    const changes = yield* PubSub.unbounded<ProjectEnrichmentChange>();
+    const empty = Effect.succeed({
+      repositoryIdentity: null,
+      faviconPath: null,
+      repositoryIdentityResolved: false,
+    });
+    return ProjectEnrichmentService.of({
+      peek: Effect.fn("ProjectEnrichmentService.peek")(() => empty),
+      getAvailable: Effect.fn("ProjectEnrichmentService.getAvailable")(() => empty),
+      request: Effect.fn("ProjectEnrichmentService.request")(() => Effect.void),
+      invalidate: Effect.fn("ProjectEnrichmentService.invalidate")(() => Effect.void),
+      subscribeChanges: PubSub.subscribe(changes),
+    });
+  }
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const faviconResolver = yield* ProjectFaviconResolver.ProjectFaviconResolver;
   const cacheCapacity = Math.max(1, options.cacheCapacity ?? DEFAULT_CACHE_CAPACITY);

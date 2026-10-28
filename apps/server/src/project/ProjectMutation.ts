@@ -1,7 +1,8 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import { type ProjectMutation } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
-import { type ProjectService } from "./ProjectService.ts";
+import { ProjectOperationError, type ProjectService } from "./ProjectService.ts";
 
 type ProjectMutations = Pick<ProjectService["Service"], "create" | "delete" | "update">;
 
@@ -9,6 +10,12 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
   projects: ProjectMutations,
   mutation: ProjectMutation,
 ) {
+  if (isNativeTexos())
+    return yield* new ProjectOperationError({
+      operation: "dispatch-project-command",
+      projectId: mutation.projectId,
+      cause: "Native chat uses its private preview project; project mutations are unsupported.",
+    });
   switch (mutation.type) {
     case "project.create":
       return yield* projects.create({

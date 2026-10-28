@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import {
   ModelCapabilities,
   TrimmedNonEmptyString,
@@ -189,6 +190,7 @@ const BundledOnlyModelManifest: ModelManifest["Service"] = {
 const layerBundledOnly = Layer.succeed(ModelManifest, BundledOnlyModelManifest);
 
 export const make = Effect.gen(function* () {
+  if (isNativeTexos()) return BundledOnlyModelManifest;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig;

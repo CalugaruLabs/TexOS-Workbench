@@ -1,3 +1,4 @@
+import { isNativeTexos, nativeCommandProblem } from "../nativeTexos/profile.ts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
@@ -314,6 +315,21 @@ export const layer: Layer.Layer<
       const checkpointScope = projection.checkpointScopes.find(
         (candidate) => candidate.id === rootNode?.checkpointScopeId,
       );
+      if (isNativeTexos()) {
+        const problem = !message
+          ? "Missing native user message"
+          : nativeCommandProblem({
+              ...message,
+              type: "message.dispatch",
+              dispatchMode: { type: "start_immediately" },
+              modelSelection: run.modelSelection,
+            });
+        if (problem || projection.thread.branch !== null || projection.thread.worktreePath !== null)
+          return yield* new ProviderTurnStartError({
+            runId,
+            cause: problem ?? "Native chat has no Git/worktree execution.",
+          });
+      }
       // Older versions also stored subagent replies as history handoffs. Their
       // queued completion messages carry the results without a history budget.
       const subagentResultTransfers = new Set(
@@ -482,7 +498,11 @@ export const layer: Layer.Layer<
           });
         },
       );
-      if (message.attachments.length === 0 && message.text.trimStart().startsWith("/")) {
+      if (
+        !isNativeTexos() &&
+        message.attachments.length === 0 &&
+        message.text.trimStart().startsWith("/")
+      ) {
         const isEmptyCompaction =
           message.text.trim().toLowerCase() === "/compact" && !projection.hasConversation;
         // Preparation may select a new provider; account commands still target the last native session.
@@ -1357,11 +1377,12 @@ export const layer: Layer.Layer<
               }),
         ),
       );
-      const deliverySession =
-        effectiveHandoffs.length === 0 &&
-        missedItems.length === 0 &&
-        restartNote === "" &&
-        !noteContinuation
+      const deliverySession = isNativeTexos()
+        ? session
+        : effectiveHandoffs.length === 0 &&
+            missedItems.length === 0 &&
+            restartNote === "" &&
+            !noteContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);
       return runExecution.startRootRun({
@@ -1400,7 +1421,7 @@ export const layer: Layer.Layer<
         loadRunInterruptReason: runControls.loadRunInterruptReason,
         message: {
           messageId: message.id,
-          text: userText,
+          text: isNativeTexos() ? message.text : userText,
           attachments: message.attachments,
           createdBy: message.createdBy,
           creationSource: message.creationSource,

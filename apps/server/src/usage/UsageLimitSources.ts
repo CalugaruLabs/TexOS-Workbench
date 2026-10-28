@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import {
   DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL,
   UsageLimitSourceError,
@@ -48,6 +49,15 @@ function sourceLabel(id: string, config: UsageLimitSourceConfig): string {
 
 /** @public */
 export const make = Effect.gen(function* () {
+  if (isNativeTexos())
+    return UsageLimitSources.of({
+      current: Effect.succeed([]),
+      streamChanges: Stream.never,
+      refresh: Effect.void,
+      consumeResetCredit: Effect.fn("UsageLimitSources.consumeResetCredit")(() =>
+        Effect.die(new Error("Reset credits are unavailable in native TexOS presentation.")),
+      ),
+    });
   const api = yield* makeCliproxyApi;
   const settingsService = yield* Settings.ServerSettingsService;
   const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;

@@ -1,3 +1,9 @@
+import {
+  isNativeTexos,
+  nativeCommandProblem,
+  markFreshPreviewThread,
+  isFreshPreviewThread,
+} from "../nativeTexos/profile.ts";
 import type {
   GuestShareId,
   OrchestrationV2SearchThreadInput,
@@ -11761,6 +11767,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.thread_id": commandThreadId(command),
     });
 
+    if (isNativeTexos() && command.type === "message.dispatch") {
+      if (!isFreshPreviewThread(command.threadId))
+        return yield* new OrchestratorCommandRejectedError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This preview thread belongs to an earlier server process. Start a new thread.",
+        });
+      const previous = yield* projectionStore
+        .getThreadRecords(command.threadId, ["runs"])
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+          ),
+        );
+      if (previous.runs.length > 0)
+        return yield* new OrchestratorCommandRejectedError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "One fresh turn per preview conversation. Start a new thread.",
+        });
+    }
     const events = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
     const effects = yield* Ref.make<Array<PendingOrchestrationEffectV2>>([]);
     let cancelUnsettledEffects:
@@ -12314,10 +12341,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
   const dispatchWithReceipt = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
-    const dispatch = threadDispatch.withLock(
-      commandThreadId(command),
-      dispatchWithReceiptEffect(command),
-    );
+    if (isNativeTexos()) {
+      const problem = nativeCommandProblem(command);
+      if (problem)
+        return yield* new OrchestratorCommandRejectedError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: problem,
+        });
+    }
+    const dispatch = threadDispatch
+      .withLock(commandThreadId(command), dispatchWithReceiptEffect(command))
+      .pipe(
+        Effect.tap((result) =>
+          Effect.sync(() => {
+            if (isNativeTexos() && command.type === "thread.create" && result.replayed !== true)
+              markFreshPreviewThread(command.threadId);
+          }),
+        ),
+      );
     if (command.type !== "message.dispatch" || !mayStartSubagentFollowup(command))
       return yield* dispatch;
     const parentThreadId = yield* appOwnedSubagentParentThreadId(command.threadId).pipe(

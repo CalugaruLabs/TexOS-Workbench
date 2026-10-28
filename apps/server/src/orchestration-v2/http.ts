@@ -1,3 +1,4 @@
+import { isNativeTexos } from "../nativeTexos/profile.ts";
 import {
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
@@ -223,6 +224,19 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.threadBoundedSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          if (isNativeTexos()) {
+            const thread = yield* threadManagement
+              .getThreadShell(args.params.threadId)
+              .pipe(Effect.catchCause(() => Effect.succeed(null)));
+            if (
+              !thread ||
+              thread.projectId !== "native-texos-preview" ||
+              thread.modelSelection.model !== "native-settings" ||
+              thread.branch !== null ||
+              thread.worktreePath !== null
+            )
+              return yield* failEnvironmentNotFound("thread_not_found");
+          }
           const snapshot = yield* loadThreadSnapshotWindow(args.params.threadId).pipe(
             traceLocalHandlerWork,
           );

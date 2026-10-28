@@ -11,6 +11,7 @@ import { assert, it, vi } from "vite-plus/test";
 import { fixPath, hydratePosixHome } from "./os-jank.ts";
 
 vi.mock("node:child_process", { spy: true });
+vi.mock("node:os", { spy: true });
 
 it("hydrates HOME independently of a blank process HOME", () => {
   const originalHome = process.env.HOME;
@@ -150,4 +151,50 @@ effectIt.effect("replaces a Path-spelled Windows PATH instead of adding a second
 
     assert.deepEqual(env, { PATH: "C:\\Tools;C:\\Windows" });
   }),
+);
+
+effectIt.effect.each([
+  { platform: "darwin" as const, home: undefined },
+  { platform: "darwin" as const, home: "/synthetic/native-home" },
+  { platform: "linux" as const, home: undefined },
+])(
+  "native profile preserves supplied environment without account or shell probes: %j",
+  ({ platform, home }) =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const shell = vi.spyOn(NodeChildProcess, "execFileSync").mockImplementation(() => {
+          throw new Error("Native presentation must not probe login shells or launchctl");
+        });
+        const account = vi.spyOn(NodeOS, "userInfo").mockImplementation(() => {
+          throw new Error("Native presentation must not inspect the owner account");
+        });
+        return { shell, account };
+      }),
+      ({ shell, account }) =>
+        Effect.gen(function* () {
+          const env: NodeJS.ProcessEnv = {
+            T3CODE_TEXOS_NATIVE_BRIDGE: "1",
+            PATH: "/synthetic/native-bin",
+            SHELL: "/synthetic/not-a-login-shell",
+            __MISE_DIFF: "synthetic-preserved",
+          };
+          if (home !== undefined) env.HOME = home;
+          const before = { ...env };
+          // Freeze also makes any attempted mutation fail, even if fixPath catches it.
+          Object.freeze(env);
+          yield* fixPath().pipe(
+            Effect.provideService(HostProcess.Platform, platform),
+            Effect.provideService(HostProcess.Environment, env),
+            Effect.provide(NodeServices.layer),
+          );
+          assert.equal(shell.mock.calls.length, 0);
+          assert.equal(account.mock.calls.length, 0);
+          assert.deepEqual(env, before);
+        }),
+      ({ shell, account }) =>
+        Effect.sync(() => {
+          shell.mockRestore();
+          account.mockRestore();
+        }),
+    ),
 );

@@ -628,6 +628,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["generated thread titles source control content default provider"],
   },
   {
+    id: "workspace-auto-extract",
+    title: "Save ideas, tasks and decisions",
+    to: "/settings/threads",
+    searchTerms: ["workspace inbox file organize extract automatic"],
+  },
+  {
     id: "thread-title-instructions",
     title: "Thread title instructions",
     to: "/settings/threads",

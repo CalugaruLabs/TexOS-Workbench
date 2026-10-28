@@ -23,6 +23,7 @@ import {
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildWorkspaceItemsPrompt,
 } from "@t3tools/provider-core/server/textGenerationPrompts";
 import {
   sanitizeCommitSubject,
@@ -342,11 +343,21 @@ export const makeMuseTextGeneration = Effect.fn("makeMuseTextGeneration")(functi
   });
   const generateReviewGuide: ProviderTextGeneration["generateReviewGuide"] = () =>
     Effect.fail(investigationUnsupported("generateReviewGuide", "Muse Code"));
+  const generateWorkspaceItems: ProviderTextGeneration["generateWorkspaceItems"] = Effect.fn(
+    "MuseTextGeneration.generateWorkspaceItems",
+  )(function* (input) {
+    return yield* runMuseJson({
+      operation: "generateWorkspaceItems",
+      ...buildWorkspaceItemsPrompt(input),
+      modelSelection: input.modelSelection,
+    });
+  });
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
     generateReviewGuide,
+    generateWorkspaceItems,
   } satisfies ProviderTextGeneration;
 });

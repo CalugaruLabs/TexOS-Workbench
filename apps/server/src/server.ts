@@ -45,6 +45,7 @@ import * as PullRequestFilesViewed from "./persistence/PullRequestFilesViewed.ts
 import * as PullRequestReviewGuides from "./persistence/PullRequestReviewGuides.ts";
 import * as ProjectDocs from "./project/ProjectDocs.ts";
 import * as Workspace from "./workspace/Workspace.ts";
+import * as WorkspaceAutoFiler from "./workspace/WorkspaceAutoFiler.ts";
 import * as PullRequestReviewGuideService from "./pullRequest/PullRequestReviewGuideService.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
@@ -612,6 +613,12 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       yield* service.start();
     }),
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const service = yield* WorkspaceAutoFiler.WorkspaceAutoFiler;
+      yield* service.start();
+    }),
+  ).pipe(Layer.provide(WorkspaceAutoFiler.layer), Layer.provide(Workspace.layer)),
   ProviderUsageLimitsIngestion.layer,
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,

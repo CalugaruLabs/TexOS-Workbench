@@ -482,3 +482,60 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
 
   return { prompt, outputSchema };
 }
+
+const WORKSPACE_ITEMS_PROMPT = `Read this conversation between a user and a coding agent and pull out what the user would want to find again later in their workspace.
+Return JSON with keys items and filing.
+
+items: an array of objects with keys kind, title, body and quote.
+- kind "task": something the user or agent still has to do that this conversation did not finish.
+- kind "idea": a possibility the user raised or liked but did not commit to.
+- kind "decision": a choice the user made or confirmed, such as picking an approach or a scope.
+- title: under 80 characters, plain words, phrased so it makes sense on its own weeks later.
+- body: one or two sentences of context, or an empty string.
+- quote: the shortest exact excerpt from the conversation that supports the item.
+Return an empty array rather than padding it. Skip routine steps the agent already finished, questions that were answered, code details, and anything already listed under "Already saved".
+
+filing: only when "Places" are listed; otherwise null.
+- placeId: the id of the one place where this conversation belongs, or null if none fits.
+- confident: true only when the conversation is clearly about that place.
+- reason: under 80 characters, telling the user why it belongs there, such as "Talks about the health tracker's weekly email".
+- newProjectName: when nothing fits and the conversation is clearly about a new project, a short name for it; otherwise omit it.`;
+
+export interface WorkspaceItemsPromptInput {
+  readonly threadTitle: string;
+  readonly conversation: string;
+  readonly saved: ReadonlyArray<string>;
+  readonly places?: ReadonlyArray<{ readonly id: string; readonly name: string }> | undefined;
+}
+
+export const WorkspaceItemsOutput = Schema.Struct({
+  items: Schema.Array(
+    Schema.Struct({
+      kind: Schema.Literals(["idea", "task", "decision"]),
+      title: Schema.String,
+      body: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+      quote: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+    }),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  filing: Schema.NullOr(
+    Schema.Struct({
+      placeId: Schema.NullOr(Schema.String),
+      confident: Schema.Boolean,
+      reason: Schema.String,
+      newProjectName: Schema.optional(Schema.String),
+    }),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+});
+
+export function buildWorkspaceItemsPrompt(input: WorkspaceItemsPromptInput) {
+  const places =
+    input.places === undefined || input.places.length === 0
+      ? "Places: none"
+      : `Places:\n${input.places.map((place) => `- ${place.id}: ${place.name}`).join("\n")}`;
+  const saved =
+    input.saved.length === 0
+      ? "Already saved: none"
+      : `Already saved:\n- ${input.saved.join("\n- ")}`;
+  const prompt = `${WORKSPACE_ITEMS_PROMPT}\n\n${places}\n\n${limitSection(saved, 4_000)}\n\nConversation title: ${input.threadTitle}\n\nConversation:\n${preserveMessageEnd(input.conversation)}`;
+  return { prompt, outputSchema: WorkspaceItemsOutput };
+}

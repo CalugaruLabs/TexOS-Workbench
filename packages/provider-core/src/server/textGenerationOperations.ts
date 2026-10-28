@@ -12,6 +12,7 @@ import {
   buildPrContentPrompt,
   buildReviewGuidePrompt,
   buildThreadTitlePrompt,
+  buildWorkspaceItemsPrompt,
 } from "./textGenerationPrompts.ts";
 import {
   sanitizeCommitSubject,
@@ -167,11 +168,23 @@ export function fromRunner(name: string, run: Runner): ProviderTextGeneration {
     });
   });
 
+  const generateWorkspaceItems: ProviderTextGeneration["generateWorkspaceItems"] = Effect.fn(
+    `${name}.generateWorkspaceItems`,
+  )(function* (input) {
+    return yield* run({
+      operation: "generateWorkspaceItems",
+      cwd: input.cwd,
+      modelSelection: input.modelSelection,
+      ...buildWorkspaceItemsPrompt(input),
+    });
+  });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
     generateReviewGuide,
+    generateWorkspaceItems,
   } satisfies ProviderTextGeneration;
 }

@@ -1827,6 +1827,20 @@ export function ThreadsSettingsPanel() {
             )
           }
         />
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("workspace-auto-extract")}
+          description="After a chat goes quiet, the text generation model saves its ideas, tasks and decisions to your workspace and files chats without a project."
+          control={
+            <Switch
+              checked={settings.workspaceAutoExtract}
+              onCheckedChange={(checked) =>
+                updateSettings({ workspaceAutoExtract: Boolean(checked) })
+              }
+              aria-label="Save ideas, tasks and decisions"
+            />
+          }
+        />
         <AdvancedSettings
           targetIds={[
             searchableSetting("thread-title-instructions").id,

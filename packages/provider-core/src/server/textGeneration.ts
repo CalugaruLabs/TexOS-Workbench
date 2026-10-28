@@ -97,6 +97,33 @@ export type ReviewGuideGenerationResult = Omit<
   "headSha" | "generatedAt" | "modelSelection"
 >;
 
+export interface WorkspaceItemsGenerationInput {
+  cwd: string;
+  threadTitle: string;
+  /** Messages since the last pass, oldest first, each prefixed with its speaker. */
+  conversation: string;
+  /** Titles already in the workspace, so the model does not save them again. */
+  saved: ReadonlyArray<string>;
+  /** Where an unfiled conversation could go; omitted when the thread is already filed. */
+  places?: ReadonlyArray<{ readonly id: string; readonly name: string }> | undefined;
+  modelSelection: ModelSelection;
+}
+
+export interface WorkspaceItemsGenerationResult {
+  items: ReadonlyArray<{
+    readonly kind: "idea" | "task" | "decision";
+    readonly title: string;
+    readonly body: string;
+    readonly quote: string;
+  }>;
+  filing: {
+    readonly placeId: string | null;
+    readonly confident: boolean;
+    readonly reason: string;
+    readonly newProjectName?: string | undefined;
+  } | null;
+}
+
 export interface ProviderTextGeneration {
   readonly generateCommitMessage: (
     input: CommitMessageGenerationInput,
@@ -117,4 +144,8 @@ export interface ProviderTextGeneration {
   readonly generateReviewGuide: (
     input: ReviewGuideGenerationInput,
   ) => Effect.Effect<ReviewGuideGenerationResult, TextGenerationError>;
+
+  readonly generateWorkspaceItems: (
+    input: WorkspaceItemsGenerationInput,
+  ) => Effect.Effect<WorkspaceItemsGenerationResult, TextGenerationError>;
 }

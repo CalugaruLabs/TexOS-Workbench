@@ -12,6 +12,7 @@ import {
   type WorkspaceItem,
   type WorkspaceItemKind,
   type WorkspaceLocation,
+  type WorkspaceThreadFiling,
 } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
 import {
@@ -29,6 +30,7 @@ import { useComposerDraftStore } from "../../composerDraftStore";
 import { isElectron } from "../../env";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { useSidebarProjectGroups } from "../../hooks/useSidebarProjectGroups";
+import { useQuietThreadShells } from "../../state/entities";
 import { useWorkspace, useWorkspaceItemCommands } from "../../hooks/useWorkspace";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { buildThreadRouteParams } from "../../threadRoutes";
@@ -135,6 +137,9 @@ export function WorkspacePage() {
                     ),
                 }}
                 view={groupWorkspaceItems(workspace, environmentId, filter)}
+                inboxChats={workspace.threadFilings.filter(
+                  (entry) => entry.filing.location._tag === "Inbox",
+                )}
               />
             )}
           </WorkspacePageContainer>
@@ -149,15 +154,18 @@ function WorkspaceBody({
   onFilterChange,
   context: partial,
   view,
+  inboxChats,
 }: {
   readonly filter: WorkspaceFilter;
   readonly onFilterChange: (filter: WorkspaceFilter) => void;
   readonly context: Omit<WorkspaceContext, "commands">;
   readonly view: ReturnType<typeof groupWorkspaceItems>;
+  readonly inboxChats: ReadonlyArray<WorkspaceThreadFiling>;
 }) {
   const commands = useWorkspaceItemCommands(partial.environmentId);
   const context = { ...partial, commands };
   const empty =
+    inboxChats.length === 0 &&
     view.inbox.length === 0 &&
     view.elsewhere.length === 0 &&
     view.areas.every((entry) => entry.items.length === 0);
@@ -215,6 +223,7 @@ function WorkspaceBody({
           </EmptyHeader>
         </Empty>
       ) : null}
+      <InboxChats filings={inboxChats} context={context} />
       <ItemSection
         id="inbox"
         icon={InboxIcon}
@@ -241,6 +250,87 @@ function WorkspaceBody({
         context={context}
       />
     </>
+  );
+}
+
+function InboxChats({
+  filings,
+  context,
+}: {
+  readonly filings: ReadonlyArray<WorkspaceThreadFiling>;
+  readonly context: WorkspaceContext;
+}) {
+  const threads = useQuietThreadShells();
+  const { environmentId, areas, projectFor, commands } = context;
+  const entries = filings.flatMap((entry) => {
+    const thread = threads.find(
+      (candidate) => candidate.environmentId === environmentId && candidate.id === entry.threadId,
+    );
+    return thread === undefined || thread.archivedAt !== null ? [] : [{ ...entry, thread }];
+  });
+  if (entries.length === 0) return null;
+
+  return (
+    <section aria-labelledby="workspace-inbox-chats">
+      <h2
+        id="workspace-inbox-chats"
+        className="mb-1 flex items-center gap-1.5 text-xs font-medium text-muted-foreground"
+      >
+        <InboxIcon aria-hidden className="size-3.5" />
+        Chats to file · {entries.length}
+      </h2>
+      <ul className="flex flex-col divide-y rounded-lg border">
+        {entries.map(({ threadId, filing, thread }) => {
+          const suggestion = filing.suggestion;
+          const suggested =
+            suggestion === undefined || suggestion.location._tag === "Inbox"
+              ? undefined
+              : locationLabel(
+                  suggestion.location,
+                  areas,
+                  (projectId) => projectFor(projectId)?.displayName,
+                );
+          return (
+            <li key={threadId} className="flex flex-wrap items-center gap-3 px-3 py-2.5 sm:px-4">
+              <MessageSquareIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0 flex-1">
+                <Link
+                  to="/$environmentId/$threadId"
+                  params={buildThreadRouteParams(scopeThreadRef(environmentId, threadId))}
+                  className="text-sm font-medium underline-offset-2 hover:underline"
+                >
+                  {thread.title}
+                </Link>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {suggested !== undefined
+                    ? `Maybe ${suggested}: ${suggestion?.reason}`
+                    : suggestion?.newProjectName !== undefined
+                      ? `Maybe a new project, "${suggestion.newProjectName}"`
+                      : filing.reason}
+                </p>
+              </div>
+              {commands.canWrite && suggestion !== undefined && suggested !== undefined ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    void commands
+                      .file({
+                        target: { _tag: "Thread", threadId },
+                        location: suggestion.location,
+                        reason: suggestion.reason,
+                      })
+                      .then((result) => reportFailure("Could not file the chat", result))
+                  }
+                >
+                  File in {suggested}
+                </Button>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 

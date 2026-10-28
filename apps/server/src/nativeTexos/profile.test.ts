@@ -143,3 +143,44 @@ it("old projections are not implicitly admitted as fresh process-local threads",
   expect(isFreshPreviewThread(id)).toBe(true);
   expect(isFreshPreviewThread("old-persisted-thread")).toBe(false);
 });
+
+it("admits only the exact read-only private shell and thread projection bootstrap routes", () => {
+  for (const method of ["GET", "HEAD"]) {
+    expect(nativeHttpAllowed(method, "/api/orchestration/shell")).toBe(true);
+    expect(
+      nativeHttpAllowed(method, "/api/orchestration/shell?omitIdleSubagents=1&omitOlderSettled=1"),
+    ).toBe(true);
+    expect(nativeHttpAllowed(method, "/api/orchestration/threads/preview-id")).toBe(true);
+    expect(nativeHttpAllowed(method, "/api/orchestration/threads/preview-id/bounded")).toBe(true);
+  }
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    expect(nativeHttpAllowed(method, "/api/orchestration/shell")).toBe(false);
+    expect(nativeHttpAllowed(method, "/api/orchestration/threads/preview-id")).toBe(false);
+    expect(nativeHttpAllowed(method, "/api/orchestration/threads/preview-id/bounded")).toBe(false);
+  }
+  for (const path of [
+    "/api/orchestration/shell/",
+    "/api/orchestration/shell/mutate",
+    "/api/orchestration/archived-shell",
+    "/api/orchestration/threads/preview-id/",
+    "/api/orchestration/threads/preview-id/mutate",
+    "/api/orchestration/threads/preview-id/bounded/mutate",
+    "/api/orchestration/threads/preview-id/transcript",
+    "/api/orchestration/threads/preview-id/history",
+    "/api/orchestration/shell/../transcript",
+    "/api/orchestration/shell%2fmutate",
+    "/api/orchestration/threads/../owner",
+    "/api/orchestration/threads/%2e%2e",
+    "/api/orchestration/threads/preview%2fid",
+    "/api/orchestration/threads/preview%5cid",
+    "/api/orchestration/threads/preview\\id",
+    "/api/billing",
+    "/api/tools",
+    "/api/docs",
+    "/api/files",
+    "/api/attachments/upload",
+    "/api/assets/private-token",
+    "/mcp",
+  ])
+    expect(nativeHttpAllowed("GET", path)).toBe(false);
+});

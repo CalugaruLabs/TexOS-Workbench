@@ -123,7 +123,11 @@ export function nativeHttpAllowed(method: string, rawURL: string): boolean {
     ].includes(path);
   if (method !== "GET" && method !== "HEAD") return false;
   if (["/ws", "/api/auth/session", "/.well-known/t3/environment"].includes(path)) return true;
-  if (/^\/api\/orchestration\/threads\/[^/]+\/bounded$/.test(path)) return true;
+  // Normal client bootstrap reads this Space's authenticated projection, just
+  // like the already-admitted orchestration.subscribeShell RPC. No tools/FS.
+  if (path === "/api/orchestration/shell") return true;
+  // Exact thread projection endpoints only; transcript/history/export remain denied.
+  if (/^\/api\/orchestration\/threads\/[^/]+(?:\/bounded)?$/.test(path)) return true;
   if (
     path.startsWith("/api/") ||
     path.startsWith("/oauth/") ||

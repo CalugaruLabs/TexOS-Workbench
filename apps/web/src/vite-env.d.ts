@@ -3,6 +3,8 @@
 import type { DesktopBridge } from "@t3tools/contracts";
 
 interface ImportMetaEnv {
+  /** Set only for the native-backed TexOS presentation client build. */
+  readonly VITE_TEXOS_NATIVE_PRESENTATION?: string;
   readonly VITE_HTTP_URL: string;
   readonly VITE_WS_URL: string;
   readonly VITE_HOSTED_APP_URL: string;

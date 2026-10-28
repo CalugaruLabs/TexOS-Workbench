@@ -9,10 +9,12 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ScopedProjectRef, WorkspaceAreaId } from "@t3tools/contracts";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
   FolderIcon,
+  InboxIcon,
   LayersIcon,
   PencilIcon,
   PlusIcon,
@@ -30,6 +32,7 @@ import {
   useWorkspaceAreaCommands,
 } from "../../hooks/useWorkspace";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
+import { isClosed } from "../workspace/workspace.logic";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import {
@@ -78,7 +81,12 @@ export function SidebarWorkspaceNavigation({
   onAddProject,
 }: WorkspaceNavigationProps) {
   useMigrateDeviceAreas();
-  const { environmentId, areas } = useWorkspace();
+  const { environmentId, workspace, areas } = useWorkspace();
+  const navigate = useNavigate();
+  const onWorkspacePage = useLocation({ select: (location) => location.pathname === "/workspace" });
+  const inboxCount =
+    workspace?.items.filter((item) => item.filing.location._tag === "Inbox" && !isClosed(item))
+      .length ?? 0;
   const collapsedIds = useClientSettings((settings) => settings.sidebarCollapsedAreaIds);
   const hydrated = useClientSettingsHydrated();
   const [editor, setEditor] = useState<AreaDraft | null>(null);
@@ -103,6 +111,24 @@ export function SidebarWorkspaceNavigation({
 
   return (
     <nav aria-label="Areas and projects">
+      <SidebarGroup>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              aria-label={`Workspace, ${inboxCount} in the Inbox`}
+              isActive={onWorkspacePage}
+              onClick={() => void navigate({ to: "/workspace" })}
+              size="sm"
+            >
+              <InboxIcon aria-hidden />
+              <span>Workspace</span>
+              {inboxCount > 0 ? (
+                <span className="ml-auto text-xs text-sidebar-muted-foreground">{inboxCount}</span>
+              ) : null}
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarGroup>
       <SidebarGroup>
         <div className="flex items-center justify-between px-2 pb-1">
           <h2 className="text-xs font-medium text-sidebar-muted-foreground">Areas</h2>

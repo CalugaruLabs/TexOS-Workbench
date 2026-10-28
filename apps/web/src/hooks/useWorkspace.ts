@@ -3,8 +3,12 @@ import type {
   EnvironmentId,
   WorkspaceArea,
   WorkspaceAreaId,
+  WorkspaceCreateItemInput,
+  WorkspaceFileInput,
+  WorkspaceItemId,
   WorkspaceSaveAreaInput,
   WorkspaceSnapshot,
+  WorkspaceUpdateItemInput,
 } from "@t3tools/contracts";
 import { useEffect, useRef } from "react";
 
@@ -47,6 +51,23 @@ export function useWorkspaceAreaCommands(environmentId: EnvironmentId) {
     canWrite,
     saveArea: (input: WorkspaceSaveAreaInput) => save({ environmentId, input }),
     deleteArea: (areaId: WorkspaceAreaId) => remove({ environmentId, input: { areaId } }),
+  };
+}
+
+export function useWorkspaceItemCommands(environmentId: EnvironmentId) {
+  const canWrite = useAtomValue(
+    serverEnvironment.createWorkspaceItem.permissionAtom(environmentId),
+  );
+  const create = useAtomCommand(serverEnvironment.createWorkspaceItem, { label: "add item" });
+  const update = useAtomCommand(serverEnvironment.updateWorkspaceItem, { label: "update item" });
+  const remove = useAtomCommand(serverEnvironment.deleteWorkspaceItem, { label: "delete item" });
+  const file = useAtomCommand(serverEnvironment.fileWorkspaceTarget, { label: "move item" });
+  return {
+    canWrite,
+    createItem: (input: WorkspaceCreateItemInput) => create({ environmentId, input }),
+    updateItem: (input: WorkspaceUpdateItemInput) => update({ environmentId, input }),
+    deleteItem: (itemId: WorkspaceItemId) => remove({ environmentId, input: { itemId } }),
+    file: (input: WorkspaceFileInput) => file({ environmentId, input }),
   };
 }
 

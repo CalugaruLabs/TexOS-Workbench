@@ -127,4 +127,85 @@ describe("personal agents presentation contract", () => {
         }),
       ).toThrow();
   });
+  it("retains recovered questions alongside new answerable work within the global attention limit", () => {
+    const question = (index: number, answerable: boolean) => ({
+      id: `request-${index}`,
+      runID: `run-${index}`,
+      tool: "request_user_input",
+      description: "Synthetic recovery question",
+      createdAt: "now",
+      kind: "question",
+      isBlocking: true,
+      answerable,
+      questions: [{ id: "direction", header: "Direction", question: "What next?" }],
+    });
+    const stale = Array.from({ length: 4 }, (_, index) => question(index, false));
+    expect(isPersonalAgentSnapshot({ ...snapshot, attention: [...stale, question(4, true)] })).toBe(
+      true,
+    );
+    expect(
+      isPersonalAgentSnapshot({
+        ...snapshot,
+        attention: Array.from({ length: 5 }, (_, index) => question(index, true)),
+      }),
+    ).toBe(false);
+    expect(
+      isPersonalAgentSnapshot({
+        ...snapshot,
+        attention: Array.from({ length: 16 }, (_, index) => question(index, false)),
+      }),
+    ).toBe(true);
+    expect(
+      isPersonalAgentSnapshot({
+        ...snapshot,
+        attention: Array.from({ length: 17 }, (_, index) => question(index, false)),
+      }),
+    ).toBe(false);
+  });
+  it("uses UTF-8 byte boundaries for question fields and answer IDs", () => {
+    const question = {
+      id: "😀".repeat(32),
+      header: "😀".repeat(32),
+      question: "😀".repeat(256),
+      options: [{ label: "😀".repeat(32), description: "😀".repeat(256) }],
+    };
+    const attention = {
+      id: "request",
+      runID: "run",
+      tool: "request_user_input",
+      description: "Synthetic UTF-8 boundary",
+      createdAt: "now",
+      kind: "question",
+      isBlocking: true,
+      answerable: true,
+      questions: [question],
+    };
+    expect(isPersonalAgentSnapshot({ ...snapshot, attention: [attention] })).toBe(true);
+    for (const invalid of [
+      { ...question, id: "😀".repeat(33) },
+      { ...question, header: "😀".repeat(33) },
+      { ...question, header: "😀".repeat(65) },
+      { ...question, question: "😀".repeat(257) },
+      { ...question, options: [{ ...question.options[0], label: "😀".repeat(33) }] },
+      { ...question, options: [{ ...question.options[0], description: "😀".repeat(257) }] },
+    ])
+      expect(
+        isPersonalAgentSnapshot({
+          ...snapshot,
+          attention: [{ ...attention, questions: [invalid] }],
+        }),
+      ).toBe(false);
+    const command = {
+      id,
+      method: "agents.respond",
+      params: { attentionID: "request", answers: { [question.id]: ["Continue"] } },
+    };
+    expect(decodePersonalAgentCommand(command)).toEqual(command);
+    expect(() =>
+      decodePersonalAgentCommand({
+        ...command,
+        params: { attentionID: "request", answers: { ["😀".repeat(33)]: ["Continue"] } },
+      }),
+    ).toThrow();
+  });
 });

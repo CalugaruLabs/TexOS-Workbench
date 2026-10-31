@@ -11,6 +11,8 @@ const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const string = (value: unknown, limit = 8192): value is string =>
   typeof value === "string" && value.length <= limit;
+const questionString = (value: unknown, limit: number): value is string =>
+  typeof value === "string" && new TextEncoder().encode(value).length <= limit;
 const integer = (value: unknown): value is number =>
   Number.isSafeInteger(value) && Number(value) >= 0;
 const optionalString = (value: unknown) => value === undefined || value === null || string(value);
@@ -53,16 +55,16 @@ const isQuestionAttention = (value: Record<string, unknown>) => {
     return false;
   const ids = new Set<string>();
   return list(value.questions, 4, (question) => {
-    if (!string(question.id, 128) || !question.id || ids.has(question.id)) return false;
+    if (!questionString(question.id, 128) || !question.id || ids.has(question.id)) return false;
     ids.add(question.id);
     return (
-      string(question.header, 128) &&
-      string(question.question, 1024) &&
+      questionString(question.header, 128) &&
+      questionString(question.question, 1024) &&
       (question.options === undefined ||
         list(
           question.options,
           8,
-          (option) => string(option.label, 128) && string(option.description, 1024),
+          (option) => questionString(option.label, 128) && questionString(option.description, 1024),
         ))
     );
   });
@@ -136,7 +138,9 @@ export function isPersonalAgentSnapshot(value: unknown): value is PersonalAgentS
         isQuestionAttention(a),
     ) &&
     Array.isArray(value.attention) &&
-    value.attention.filter((a: unknown) => record(a) && a.kind === "question").length <= 4 &&
+    value.attention.filter(
+      (a: unknown) => record(a) && a.kind === "question" && a.answerable === true,
+    ).length <= 4 &&
     list(
       value.artifacts,
       100,
@@ -186,7 +190,7 @@ export function decodePersonalAgentCommand(value: unknown): PersonalAgentCommand
           Object.entries(item).some(
             ([id, answers]) =>
               !id ||
-              id.length > 128 ||
+              !questionString(id, 128) ||
               !Array.isArray(answers) ||
               answers.length !== 1 ||
               !string(answers[0]) ||

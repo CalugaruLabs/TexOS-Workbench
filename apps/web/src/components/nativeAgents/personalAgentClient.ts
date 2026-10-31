@@ -1,0 +1,279 @@
+import type {
+  PersonalAgentHello,
+  PersonalAgentMethod,
+  PersonalAgentSnapshot,
+} from "@t3tools/contracts";
+import { isPersonalAgentHello, isPersonalAgentSnapshot } from "@t3tools/shared/personalAgents";
+import { resolvePrimaryEnvironmentHttpUrl } from "../../environments/primary/target";
+
+export interface PersonalAgentClientState {
+  hello: PersonalAgentHello | null;
+  snapshot: PersonalAgentSnapshot | null;
+  connected: boolean;
+  busy: boolean;
+  problem: string | null;
+}
+type SnapshotEvents = Pick<EventSource, "onopen" | "onerror" | "onmessage" | "close">;
+export interface PersonalAgentTransport {
+  command(
+    method: PersonalAgentMethod,
+    params: Record<string, unknown>,
+    id: string,
+  ): Promise<unknown>;
+  events(): SnapshotEvents;
+  uuid(): string;
+}
+export const personalAgentTransport: PersonalAgentTransport = {
+  // @effect-diagnostics-next-line cryptoRandomUUID:off - Browser command transport is deliberately independent of an Effect runtime.
+  uuid: () => crypto.randomUUID(),
+  events: () =>
+    new EventSource(resolvePrimaryEnvironmentHttpUrl("/api/texos/agents/events"), {
+      withCredentials: true,
+    }),
+  async command(method, params, id) {
+    const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/texos/agents"), {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id, method, params }),
+      signal: AbortSignal.timeout(7000),
+    });
+    if (!response.ok)
+      throw new Error("Native admission is unavailable. Refresh state before submitting again.");
+    const value: unknown = await response.json();
+    if (
+      !value ||
+      typeof value !== "object" ||
+      !("version" in value) ||
+      value.version !== 2 ||
+      !("id" in value) ||
+      value.id !== id ||
+      !("ok" in value)
+    )
+      throw new Error("Invalid native response.");
+    if (!value.ok) {
+      const error = "error" in value ? value.error : null;
+      throw new Error(
+        error &&
+          typeof error === "object" &&
+          "message" in error &&
+          typeof error.message === "string"
+          ? error.message
+          : "Native TexOS refused this action.",
+      );
+    }
+    if (!("result" in value)) throw new Error("Missing native result.");
+    return value.result;
+  },
+};
+
+export class PersonalAgentClient {
+  private state: PersonalAgentClientState = {
+    hello: null,
+    snapshot: null,
+    connected: false,
+    busy: false,
+    problem: null,
+  };
+  private listeners = new Set<() => void>();
+  private source: SnapshotEvents | null = null;
+  private generation = 0;
+  private requiresFreshRead = false;
+  constructor(private readonly transport: PersonalAgentTransport = personalAgentTransport) {}
+  getSnapshot = () => this.state;
+  subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  };
+  private patch(next: Partial<PersonalAgentClientState>) {
+    this.state = { ...this.state, ...next };
+    for (const listener of this.listeners) listener();
+  }
+  private accept(value: unknown) {
+    if (
+      !isPersonalAgentSnapshot(value) ||
+      value.runtimeID !== this.state.hello?.runtimeID ||
+      value.mode !== this.state.hello.mode
+    )
+      throw new Error("Personal agent snapshot does not match this workspace.");
+    if (this.state.snapshot && value.revision < this.state.snapshot.revision) return;
+    this.patch({ snapshot: value });
+  }
+  async connect() {
+    this.disconnect();
+    const generation = this.generation;
+    try {
+      const hello = await this.transport.command("agents.hello", {}, this.transport.uuid());
+      if (generation !== this.generation) return;
+      if (!isPersonalAgentHello(hello))
+        throw new Error("This native build does not support personal agents.");
+      this.patch({ hello, snapshot: null, problem: null });
+      await this.refresh();
+      if (generation !== this.generation) return;
+      const source = this.transport.events();
+      this.source = source;
+      source.onopen = () => {
+        if (generation === this.generation) void this.refresh();
+      };
+      source.onerror = () => {
+        if (generation === this.generation)
+          this.patch({
+            connected: false,
+            problem:
+              "Connection interrupted. Work may continue in TexOS. Reconnecting reads current state.",
+          });
+      };
+      source.onmessage = (event) => {
+        if (generation !== this.generation) return;
+        try {
+          this.accept(JSON.parse(event.data));
+          if (!this.requiresFreshRead) this.patch({ connected: true, problem: null });
+        } catch {
+          this.patch({
+            connected: false,
+            problem: "Could not validate agent updates. Refresh state.",
+          });
+          source.close();
+        }
+      };
+    } catch (error) {
+      if (generation === this.generation)
+        this.patch({
+          connected: false,
+          problem: error instanceof Error ? error.message : "Personal agents are unavailable.",
+        });
+    }
+  }
+  disconnect() {
+    this.generation += 1;
+    this.source?.close();
+    this.source = null;
+    this.patch({ connected: false, busy: false });
+  }
+  async refresh() {
+    const generation = this.generation;
+    try {
+      const snapshot = await this.transport.command("agents.snapshot", {}, this.transport.uuid());
+      if (generation !== this.generation) return;
+      this.accept(snapshot);
+      this.requiresFreshRead = false;
+      this.patch({ connected: true, problem: null });
+    } catch (error) {
+      if (generation === this.generation)
+        this.patch({
+          connected: false,
+          problem: error instanceof Error ? error.message : "Could not refresh agent state.",
+        });
+    }
+  }
+  async command(method: PersonalAgentMethod, params: Record<string, unknown>) {
+    if (!this.state.connected || this.state.busy || this.state.snapshot?.revoked)
+      throw new Error("Reconnect to this workspace before changing agent work.");
+    const generation = this.generation;
+    this.patch({ busy: true, problem: null });
+    try {
+      const result = await this.transport.command(method, params, this.transport.uuid());
+      if (generation !== this.generation)
+        throw new Error("Workspace changed while the command was pending.");
+      if (method !== "agents.artifact") {
+        if (!result || typeof result !== "object" || !("snapshot" in result))
+          throw new Error("Missing updated agent state.");
+        this.accept(result.snapshot);
+      }
+      return result;
+    } catch (error) {
+      this.requiresFreshRead = true;
+      if (generation === this.generation)
+        this.patch({
+          connected: false,
+          problem:
+            error instanceof Error
+              ? error.message
+              : "Outcome is uncertain. Refresh state before new work.",
+        });
+      throw error;
+    } finally {
+      if (generation === this.generation) this.patch({ busy: false });
+    }
+  }
+}
+
+export type PersonalArtifactPreview = {
+  id: string;
+  name: string;
+  mimeType: "text/html" | "text/plain" | "image/png";
+  content: string;
+};
+export async function verifyPersonalArtifact(
+  value: unknown,
+  artifactID: string,
+): Promise<PersonalArtifactPreview> {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !("id" in value) ||
+    value.id !== artifactID ||
+    !("name" in value) ||
+    typeof value.name !== "string" ||
+    !("mimeType" in value) ||
+    typeof value.mimeType !== "string" ||
+    !("base64" in value) ||
+    typeof value.base64 !== "string" ||
+    value.base64.length > 699052 ||
+    !("sha256" in value) ||
+    typeof value.sha256 !== "string"
+  )
+    throw new Error("Invalid artifact response.");
+  const bytes = Uint8Array.from(atob(value.base64), (character) => character.charCodeAt(0));
+  if (bytes.length > 512 * 1024) throw new Error("Artifact exceeds preview size.");
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const sha = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+  if (sha !== value.sha256.toLowerCase()) throw new Error("Artifact integrity check failed.");
+  if (value.mimeType === "image/png")
+    return {
+      id: artifactID,
+      name: value.name,
+      mimeType: "image/png",
+      content: `data:image/png;base64,${value.base64}`,
+    };
+  if (!["text/html", "text/plain", "text/markdown", "application/json"].includes(value.mimeType))
+    throw new Error("This artifact type has no safe preview yet.");
+  return {
+    id: artifactID,
+    name: value.name,
+    mimeType: value.mimeType === "text/html" ? "text/html" : "text/plain",
+    content: new TextDecoder().decode(bytes),
+  };
+}
+export function safePersonalArtifactHTML(html: string) {
+  const document = new DOMParser().parseFromString(html, "text/html");
+  document
+    .querySelectorAll("script,iframe,frame,object,embed,base,link,meta,form")
+    .forEach((element) => element.remove());
+  for (const element of document.querySelectorAll("*")) {
+    for (const attribute of Array.from(element.attributes)) {
+      const name = attribute.name.toLowerCase();
+      if (
+        name.startsWith("on") ||
+        ["href", "xlink:href", "action", "formaction", "srcdoc", "srcset"].includes(name) ||
+        (name === "src" &&
+          !(
+            element.tagName === "IMG" &&
+            /^data:image\/(png|jpeg|gif|webp);base64,/i.test(attribute.value)
+          ))
+      )
+        element.removeAttribute(attribute.name);
+    }
+  }
+  const policy = document.createElement("meta");
+  policy.httpEquiv = "Content-Security-Policy";
+  policy.content =
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'; frame-src 'none'; navigate-to 'none'";
+  document.head.prepend(policy);
+  return "<!doctype html>" + document.documentElement.outerHTML;
+}

@@ -1,8 +1,19 @@
+import type {
+  PersonalAgentCommand,
+  PersonalAgentEvent,
+  PersonalAgentHello,
+  PersonalAgentResponse,
+} from "@t3tools/contracts";
 // @effect-diagnostics nodeBuiltinImport:off - Private inherited Node descriptors and opaque UUIDs; no provider subprocess.
 import * as NodeTimers from "node:timers";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import type * as NodeStream from "node:stream";
+import {
+  decodePersonalAgentCommand,
+  isPersonalAgentHello,
+  isPersonalAgentSnapshot,
+} from "@t3tools/shared/personalAgents";
 
 export type NativeProvider = "codex" | "claudeCode";
 export type NativeEvent = {
@@ -44,9 +55,25 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const provider = (value: unknown): value is NativeProvider =>
   value === "codex" || value === "claudeCode";
 export const MAX_FRAME = 65536;
+export const MAX_NATIVE_FRAME = 1024 * 1024;
 
 /** A single host generation. EOF is permanent; it never reconnects or resends. */
 export class NativeBridge {
+  private agentPending = new Map<
+    string,
+    {
+      resolve: (frame: PersonalAgentResponse) => void;
+      reject: (error: Error) => void;
+      timer: ReturnType<typeof NodeTimers.setTimeout>;
+    }
+  >();
+  private expiredAgentRequests = new Set<string>();
+  private agentListeners = new Set<(event: PersonalAgentEvent) => void>();
+  private agentHello: Promise<PersonalAgentHello> | undefined;
+  private agentRuntimeID: string | undefined;
+  private agentMode: PersonalAgentHello["mode"] | undefined;
+  private agentAuthority: string | undefined;
+  private agentSequence = -1;
   private pending = new Map<
     string,
     {
@@ -93,6 +120,11 @@ export class NativeBridge {
       entry.reject(error);
     }
     this.pending.clear();
+    for (const entry of this.agentPending.values()) {
+      NodeTimers.clearTimeout(entry.timer);
+      entry.reject(error);
+    }
+    this.agentPending.clear();
     this.buffer = Buffer.alloc(0);
     // These streams are owned by this bridge. In production autoClose also closes fd3/fd4,
     // letting native observe EOF and settle/cancel its owned turn. Injected unit streams
@@ -121,16 +153,68 @@ export class NativeBridge {
       this.closeListeners.delete(listener);
     };
   }
+  onAgentEvent(listener: (event: PersonalAgentEvent) => void) {
+    this.agentListeners.add(listener);
+    return () => {
+      this.agentListeners.delete(listener);
+    };
+  }
+  private receiveAgent(frame: Record<string, unknown>) {
+    if (frame.kind === "response") {
+      if (typeof frame.id !== "string" || !uuid.test(frame.id) || typeof frame.ok !== "boolean")
+        throw new Error("Invalid personal agent response.");
+      const entry = this.agentPending.get(frame.id);
+      if (!entry && this.expiredAgentRequests.delete(frame.id)) return;
+      if (!entry) throw new Error("Unmatched personal agent response.");
+      if (
+        !frame.ok &&
+        (!frame.error ||
+          typeof frame.error !== "object" ||
+          !("code" in frame.error) ||
+          typeof frame.error.code !== "string" ||
+          !("message" in frame.error) ||
+          typeof frame.error.message !== "string")
+      )
+        throw new Error("Invalid personal agent refusal.");
+      this.agentPending.delete(frame.id);
+      NodeTimers.clearTimeout(entry.timer);
+      entry.resolve(frame as unknown as PersonalAgentResponse);
+      return;
+    }
+    if (
+      frame.kind !== "event" ||
+      frame.event !== "snapshot" ||
+      typeof frame.authorityID !== "string" ||
+      !frame.authorityID ||
+      !Number.isSafeInteger(frame.sequence) ||
+      Number(frame.sequence) < 0 ||
+      !isPersonalAgentSnapshot(frame.snapshot)
+    )
+      throw new Error("Invalid personal agent event.");
+    if (
+      (this.agentAuthority && this.agentAuthority !== frame.authorityID) ||
+      (this.agentRuntimeID && this.agentRuntimeID !== frame.snapshot.runtimeID) ||
+      (this.agentMode && this.agentMode !== frame.snapshot.mode)
+    )
+      throw new Error("Personal agent authority changed.");
+    this.agentAuthority = frame.authorityID;
+    this.agentRuntimeID = frame.snapshot.runtimeID;
+    this.agentMode = frame.snapshot.mode;
+    if (Number(frame.sequence) <= this.agentSequence) return;
+    this.agentSequence = Number(frame.sequence);
+    for (const listener of this.agentListeners) listener(frame as unknown as PersonalAgentEvent);
+  }
   private receive(chunk: Buffer) {
     if (this.failure) return;
     this.buffer = Buffer.concat([this.buffer, chunk]);
     for (;;) {
       const newline = this.buffer.indexOf(10);
       if (newline < 0) {
-        if (this.buffer.length > MAX_FRAME) this.fail(new Error("Native frame exceeds limit."));
+        if (this.buffer.length > MAX_NATIVE_FRAME)
+          this.fail(new Error("Native frame exceeds limit."));
         return;
       }
-      if (newline > MAX_FRAME || newline === 0) {
+      if (newline > MAX_NATIVE_FRAME || newline === 0) {
         this.fail(new Error("Invalid native frame size."));
         return;
       }
@@ -138,11 +222,32 @@ export class NativeBridge {
       this.buffer = this.buffer.subarray(newline + 1);
       try {
         const frame = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+        if (frame?.version === 2) {
+          this.receiveAgent(frame);
+          continue;
+        }
         if (!frame || frame.version !== 1) throw new Error("Unsupported native bridge version.");
+        if (newline > MAX_FRAME) throw new Error("Native v1 frame exceeds limit.");
         if (frame.kind === "response") {
           if (!uuid.test(frame.id) || typeof frame.ok !== "boolean")
             throw new Error("Invalid native response.");
           const entry = this.pending.get(frame.id);
+          const agentEntry = this.agentPending.get(frame.id);
+          if (!entry && agentEntry && !frame.ok) {
+            this.agentPending.delete(frame.id);
+            NodeTimers.clearTimeout(agentEntry.timer);
+            agentEntry.resolve({
+              version: 2,
+              kind: "response",
+              id: frame.id,
+              ok: false,
+              error: {
+                code: "unsupported",
+                message: "Personal agents are unavailable on this native build.",
+              },
+            });
+            continue;
+          }
           if (!entry) throw new Error("Unmatched native response.");
           this.pending.delete(frame.id);
           NodeTimers.clearTimeout(entry.timer);
@@ -180,6 +285,106 @@ export class NativeBridge {
         return;
       }
     }
+  }
+  private requestAgents(command: PersonalAgentCommand): Promise<PersonalAgentResponse> {
+    if (this.failure) return Promise.reject(this.failure);
+    if (
+      this.agentPending.size >= 16 ||
+      this.expiredAgentRequests.size >= 256 ||
+      this.agentPending.has(command.id) ||
+      this.expiredAgentRequests.has(command.id)
+    )
+      return Promise.reject(new Error("Personal agent command already pending or uncertain."));
+    const bytes = Buffer.from(JSON.stringify({ version: 2, ...command }) + "\n");
+    if (bytes.length - 1 > MAX_FRAME)
+      return Promise.reject(new Error("Personal agent request exceeds limit."));
+    return new Promise((resolve, reject) => {
+      // @effect-diagnostics-next-line globalTimers:off - Private-pipe admission deadline; expiry never retries execution or shuts down the shared native host.
+      const timer = NodeTimers.setTimeout(() => {
+        this.agentPending.delete(command.id);
+        this.expiredAgentRequests.add(command.id);
+        reject(
+          new Error(
+            "Native admission timed out; outcome is uncertain. Refresh state before new work.",
+          ),
+        );
+      }, 5000);
+      this.agentPending.set(command.id, { resolve, reject, timer });
+      try {
+        this.output.write(bytes, (error) => {
+          if (error) this.fail(new Error("Native bridge write failed."));
+        });
+      } catch {
+        this.fail(new Error("Native bridge write failed; outcome is uncertain."));
+      }
+    });
+  }
+  async agentsReady(): Promise<PersonalAgentHello> {
+    await this.ready();
+    return (this.agentHello ??= this.requestAgents({
+      id: NodeCrypto.randomUUID(),
+      method: "agents.hello",
+      params: {},
+    })
+      .then((frame) => {
+        if (!frame.ok) throw new Error(frame.error.message);
+        if (!isPersonalAgentHello(frame.result))
+          throw new Error("Personal agents are unavailable on this native build.");
+        if (
+          (this.agentRuntimeID && frame.result.runtimeID !== this.agentRuntimeID) ||
+          (this.agentMode && frame.result.mode !== this.agentMode)
+        )
+          this.protocolFailure("Personal agent runtime binding changed.");
+        this.agentRuntimeID = frame.result.runtimeID;
+        this.agentMode = frame.result.mode;
+        return frame.result;
+      })
+      .catch((error: unknown) => {
+        this.agentHello = undefined;
+        throw error;
+      }));
+  }
+  async callAgents(value: unknown): Promise<PersonalAgentResponse> {
+    const command = decodePersonalAgentCommand(value);
+    const hello = await this.agentsReady();
+    if (command.method === "agents.hello")
+      return { version: 2, kind: "response", id: command.id, ok: true, result: hello };
+    const response = await this.requestAgents(command);
+    if (response.ok && command.method !== "agents.artifact") {
+      const result = response.result;
+      const snapshot =
+        command.method === "agents.snapshot"
+          ? result
+          : result && typeof result === "object" && "snapshot" in result
+            ? result.snapshot
+            : undefined;
+      if (
+        !isPersonalAgentSnapshot(snapshot) ||
+        snapshot.runtimeID !== this.agentRuntimeID ||
+        snapshot.mode !== this.agentMode
+      )
+        this.protocolFailure("Invalid personal agent snapshot response.");
+    } else if (response.ok && command.method === "agents.artifact") {
+      const result = response.result;
+      if (
+        !result ||
+        typeof result !== "object" ||
+        !("id" in result) ||
+        result.id !== command.params.artifactID ||
+        !("name" in result) ||
+        typeof result.name !== "string" ||
+        !("mimeType" in result) ||
+        typeof result.mimeType !== "string" ||
+        !("base64" in result) ||
+        typeof result.base64 !== "string" ||
+        result.base64.length > 699052 ||
+        !("sha256" in result) ||
+        typeof result.sha256 !== "string" ||
+        !/^[a-f0-9]{64}$/i.test(result.sha256)
+      )
+        this.protocolFailure("Invalid personal agent artifact response.");
+    }
+    return response;
   }
   private request(request: Request): Promise<NativeResponse> {
     if (this.failure) return Promise.reject(this.failure);

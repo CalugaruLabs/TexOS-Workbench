@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
-import { NativeBridge, MAX_FRAME } from "./bridge.ts";
+import { NativeBridge, MAX_FRAME, MAX_NATIVE_FRAME } from "./bridge.ts";
 
 const { PassThrough } = await vi.importActual<typeof import("node:stream")>("node:stream");
 const { once } = await vi.importActual<typeof import("node:events")>("node:events");
@@ -152,12 +152,125 @@ describe("native private bridge", () => {
     expect(p.requests.filter((r) => r.method === "message.send")).toHaveLength(1);
   });
   it("rejects oversized and malformed UTF-8 frames", async () => {
-    for (const data of [Buffer.alloc(MAX_FRAME + 1, 65), Buffer.from([0xff, 10])]) {
+    for (const data of [Buffer.alloc(MAX_NATIVE_FRAME + 1, 65), Buffer.from([0xff, 10])]) {
       const p = peer();
       const pending = p.client.ready();
       p.input.write(data);
       await expect(pending).rejects.toThrow();
     }
+  });
+});
+
+const agentSnapshot = (revision = 1) => ({
+  revision,
+  runtimeID: "personal-runtime",
+  mode: "fake",
+  revoked: false,
+  agents: [],
+  runs: [],
+  messages: [],
+  attention: [],
+  artifacts: [],
+});
+const agentHello = {
+  protocolVersion: 2,
+  personalOnly: true,
+  runtimeID: "personal-runtime",
+  mode: "fake",
+  capabilities: ["agents.v2", "queue", "permissions", "events"],
+};
+describe("native personal agents v2", () => {
+  it("keeps v1 hello unchanged and separately negotiates v2 without caller authority", async () => {
+    const p = peer();
+    p.setAnswer((request) => {
+      if (request.version === 1)
+        p.respond(request, { ok: true, providers: ["codex", "claudeCode"] });
+      else
+        p.input.write(
+          JSON.stringify({
+            version: 2,
+            kind: "response",
+            id: request.id,
+            ok: true,
+            result: request.method === "agents.hello" ? agentHello : agentSnapshot(),
+          }) + "\n",
+        );
+    });
+    await expect(
+      p.client.callAgents({ id: randomUUID(), method: "agents.snapshot", params: {} }),
+    ).resolves.toMatchObject({ ok: true, result: { runtimeID: "personal-runtime" } });
+    expect(p.requests.map((r) => r.method)).toEqual(["hello", "agents.hello", "agents.snapshot"]);
+    expect(Object.keys(p.requests[0]!).sort()).toEqual(["id", "kind", "method", "version"]);
+    expect(p.requests[2]).not.toHaveProperty("authorityID");
+    await expect(
+      p.client.callAgents({
+        id: randomUUID(),
+        method: "agents.submit",
+        authorityID: "another",
+        params: { agentID: "a", text: "x" },
+      }),
+    ).rejects.toThrow();
+    expect(p.requests).toHaveLength(3);
+  });
+  it("a legacy native refusal hides personal agents without closing v1", async () => {
+    const p = peer();
+    p.setAnswer((request) =>
+      p.respond(
+        request,
+        request.version === 1
+          ? { ok: true, providers: ["codex"] }
+          : { ok: false, problem: "unsupported version" },
+      ),
+    );
+    await expect(p.client.agentsReady()).rejects.toThrow("unavailable");
+    await expect(p.client.ready()).resolves.toMatchObject({ providers: ["codex"] });
+    expect(p.input.destroyed || p.output.destroyed).toBe(false);
+  });
+  it("accepts large bounded snapshots, deduplicates events, and rejects a changed authority", async () => {
+    const p = peer();
+    const snapshot = {
+      ...agentSnapshot(),
+      messages: Array.from({ length: 30 }, (_, i) => ({
+        id: `m${i}`,
+        conversationID: "c",
+        role: "assistant",
+        text: "a".repeat(4096),
+        createdAt: "2026-10-30T00:00:00Z",
+      })),
+    };
+    expect(Buffer.byteLength(JSON.stringify(snapshot))).toBeGreaterThan(MAX_FRAME);
+    p.setAnswer((request) => {
+      if (request.version === 1) p.respond(request, { ok: true, providers: ["codex"] });
+      else
+        p.input.write(
+          JSON.stringify({
+            version: 2,
+            kind: "response",
+            id: request.id,
+            ok: true,
+            result: request.method === "agents.hello" ? agentHello : snapshot,
+          }) + "\n",
+        );
+    });
+    await p.client.callAgents({ id: randomUUID(), method: "agents.snapshot", params: {} });
+    const events: unknown[] = [];
+    p.client.onAgentEvent((event) => events.push(event));
+    const event = {
+      version: 2,
+      kind: "event",
+      authorityID: "space-a",
+      event: "snapshot",
+      sequence: 1,
+      snapshot,
+    };
+    p.input.write(JSON.stringify(event) + "\n");
+    p.input.write(JSON.stringify(event) + "\n");
+    expect(events).toHaveLength(1);
+    p.input.write(JSON.stringify({ ...event, sequence: 2, authorityID: "space-b" }) + "\n");
+    await expect(
+      p.client.callAgents({ id: randomUUID(), method: "agents.snapshot", params: {} }),
+    ).rejects.toThrow();
+    expect(events).toHaveLength(1);
   });
 });
 

@@ -116,12 +116,14 @@ export function nativeHttpAllowed(method: string, rawURL: string): boolean {
   }
   if (method === "POST")
     return [
+      "/api/texos/agents",
       "/api/auth/browser-session",
       "/api/auth/websocket-ticket",
       "/api/auth/websocket-ticket/rpc",
       "/oauth/token",
     ].includes(path);
   if (method !== "GET" && method !== "HEAD") return false;
+  if (path === "/api/texos/agents/events") return method === "GET";
   if (["/ws", "/api/auth/session", "/.well-known/t3/environment"].includes(path)) return true;
   // Normal client bootstrap reads this Space's authenticated projection, just
   // like the already-admitted orchestration.subscribeShell RPC. No tools/FS.

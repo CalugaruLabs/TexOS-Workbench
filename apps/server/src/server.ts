@@ -1,4 +1,5 @@
 import * as NativeStartupLayers from "./nativeTexos/StartupLayers.ts";
+import * as NativeAgentsHttp from "./nativeTexos/agentsHttp.ts";
 import { isNativeTexos, nativeHttpAllowed, nativeStartupProblem } from "./nativeTexos/profile.ts";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
@@ -725,6 +726,7 @@ const layerMakeRoutes = Layer.mergeAll(
     GuestHttp.layer,
     DeviceHubProxy.layer,
     ServerBrowserStream.routeLayer,
+    NativeAgentsHttp.layer,
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
   ),

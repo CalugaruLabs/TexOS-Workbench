@@ -144,6 +144,22 @@ it("old projections are not implicitly admitted as fresh process-local threads",
   expect(isFreshPreviewThread("old-persisted-thread")).toBe(false);
 });
 
+it("admits only exact personal-agent command and snapshot-event paths", () => {
+  expect(nativeHttpAllowed("POST", "/api/texos/agents")).toBe(true);
+  expect(nativeHttpAllowed("GET", "/api/texos/agents/events")).toBe(true);
+  for (const method of ["GET", "HEAD", "PATCH", "DELETE"])
+    expect(nativeHttpAllowed(method, "/api/texos/agents")).toBe(false);
+  for (const method of ["POST", "HEAD", "PATCH", "DELETE"])
+    expect(nativeHttpAllowed(method, "/api/texos/agents/events")).toBe(false);
+  for (const path of [
+    "/api/texos/agents/",
+    "/api/texos/agents/execute",
+    "/api/texos/agents/events/",
+    "/api/texos/agents%2fevents",
+  ])
+    expect(nativeHttpAllowed("POST", path)).toBe(false);
+});
+
 it("admits only the exact read-only private shell and thread projection bootstrap routes", () => {
   for (const method of ["GET", "HEAD"]) {
     expect(nativeHttpAllowed(method, "/api/orchestration/shell")).toBe(true);

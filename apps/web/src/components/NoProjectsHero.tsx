@@ -1,4 +1,5 @@
 import { MessageSquareDashedIcon, PlusIcon } from "lucide-react";
+import { NativePersonalAgents } from "./nativeAgents/NativePersonalAgents";
 
 import { openCommandPalette } from "../commandPaletteBus";
 import { isElectron } from "../env";
@@ -29,6 +30,9 @@ export function NoProjectsHero() {
                   : "Add a project, or start without one."}
               </EmptyDescription>
               <div className="mt-6 flex justify-center gap-2">
+                {import.meta.env.VITE_TEXOS_NATIVE_PRESENTATION === "1" ? (
+                  <NativePersonalAgents />
+                ) : null}
                 <Button size="sm" onClick={() => openCommandPalette({ open: "add-project" })}>
                   <PlusIcon className="size-4" />
                   Add project

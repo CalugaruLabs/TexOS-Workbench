@@ -1,4 +1,5 @@
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
+import { NativePersonalAgents } from "./nativeAgents/NativePersonalAgents";
 import { queuedRunEditBlockedReason } from "@t3tools/client-runtime/queued-run-edit";
 import { ScrollToEndButton, WorkspaceFileDropOverlay } from "./chat/TimelineOverlays";
 import { usePasteToFocusComposer } from "./chat/usePasteToFocusComposer";
@@ -3212,6 +3213,9 @@ export default function ChatView(props: ChatViewProps) {
 
         {nativeTexosPresentation ? (
           <div role="status" className="border-b px-4 py-2 text-xs text-muted-foreground">
+            <div className="mb-2">
+              <NativePersonalAgents />
+            </div>
             Native TexOS execution in Workbench · One fresh turn per preview conversation. Choose
             the same provider currently selected in native Chat Settings. After one send, start a
             new thread; use the native header for Chat settings or Native Chat. Brain/Memory

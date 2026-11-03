@@ -10,7 +10,7 @@ import {
 } from "./personalAgentClient";
 import "../../index.css";
 
-function fixture(questionMode?: "answerable" | "stale") {
+function fixture(questionMode?: "answerable" | "stale", approvalAnswerable: boolean | null = true) {
   const now = "2026-10-30T00:00:00Z";
   const snapshot: PersonalAgentSnapshot = {
     revision: 1,
@@ -90,6 +90,7 @@ function fixture(questionMode?: "answerable" | "stale") {
         tool: "read_file",
         description: "Read the synthetic Work Brief checklist",
         createdAt: now,
+        ...(approvalAnswerable === null ? {} : { answerable: approvalAnswerable }),
       },
     ],
     artifacts: [
@@ -260,6 +261,21 @@ it("shows native agents, verified results, approvals and follow-up without provi
       params: { agentID: "codex-agent", text: "Keep the same conversation and add a next action." },
     },
   ]);
+});
+
+it("disables permission decisions when live answerability is false or absent", async () => {
+  for (const flag of [false, null]) {
+    const f = fixture(undefined, flag);
+    await using screen = await render(<NativePersonalAgents client={f.client} />);
+    await expect.element(screen.getByRole("button", { name: "Agents", exact: true })).toBeVisible();
+    await screen.getByRole("button", { name: "Agents", exact: true }).click();
+    await page.getByRole("button", { name: "Reviewer", exact: true }).click();
+    await expect
+      .element(page.getByRole("button", { name: "Allow once", exact: true }))
+      .toBeDisabled();
+    await expect.element(page.getByRole("button", { name: "Decline", exact: true })).toBeDisabled();
+    expect(f.commands.some((command) => command.method === "agents.answer")).toBe(false);
+  }
 });
 
 it("removes active content and navigation before loading an HTML result", () => {

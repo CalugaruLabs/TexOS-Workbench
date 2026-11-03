@@ -3,6 +3,8 @@ import {
   decodePersonalAgentCommand,
   isPersonalAgentHello,
   isPersonalAgentSnapshot,
+  isPersonalAgentHistoryPage,
+  isPersonalAgentRunDetail,
 } from "./personalAgents.ts";
 
 const id = "00000000-0000-4000-8000-000000000001";
@@ -18,6 +20,141 @@ const snapshot = {
   artifacts: [],
 };
 describe("personal agents presentation contract", () => {
+  it("admits bounded runtime history and run parameters without authority overrides", () => {
+    for (const params of [
+      { collection: "runs" },
+      { collection: "artifacts", before: 0, limit: 50, conversationID: "c" },
+    ])
+      expect(decodePersonalAgentCommand({ id, method: "agents.history", params }).params).toEqual(
+        params,
+      );
+    expect(
+      decodePersonalAgentCommand({ id, method: "agents.run", params: { runID: "old" } }).method,
+    ).toBe("agents.run");
+    for (const params of [
+      {},
+      { collection: "sessions" },
+      { collection: ["runs"] },
+      { collection: "runs", before: -1 },
+      { collection: "runs", before: 1.5 },
+      { collection: "runs", limit: 0 },
+      { collection: "runs", limit: 51 },
+      { collection: "runs", conversationID: " " },
+      { collection: "runs", conversationID: "😀".repeat(65) },
+      { collection: "runs", authorityID: "other" },
+    ])
+      expect(() => decodePersonalAgentCommand({ id, method: "agents.history", params })).toThrow();
+    for (const runID of ["", " ", "😀".repeat(65), 4])
+      expect(() =>
+        decodePersonalAgentCommand({ id, method: "agents.run", params: { runID } }),
+      ).toThrow();
+  });
+  it("validates correlated bounded history pages and detail independently of snapshots", () => {
+    const run = {
+      id: "old",
+      agentID: "a",
+      taskID: "t",
+      conversationID: "c",
+      status: "completed",
+      text: "retained",
+      createdAt: "now",
+      updatedAt: "now",
+    };
+    const page = {
+      runtimeID: "runtime",
+      revision: 2,
+      collection: "runs",
+      items: [run],
+      nextBefore: 10,
+    };
+    const params = { collection: "runs", limit: 1, before: 11, conversationID: "c" };
+    expect(isPersonalAgentHistoryPage(page, params)).toBe(true);
+    for (const invalid of [
+      { ...page, items: [run, run] },
+      { ...page, collection: "messages" },
+      { ...page, nextBefore: 11 },
+      { ...page, nextBefore: -1 },
+      { ...page, items: [{ ...run, conversationID: "foreign" }] },
+      { ...page, items: [{ ...run, providerTurnID: "private" }] },
+      { ...page, items: [{ ...run, text: "x".repeat(2048) }] },
+    ])
+      expect(isPersonalAgentHistoryPage(invalid, params)).toBe(false);
+    const detail = {
+      runtimeID: "runtime",
+      revision: 2,
+      run: { ...run, text: "x".repeat(8000) },
+      attention: [],
+      artifacts: [],
+      totalAttention: 0,
+      totalArtifacts: 0,
+    };
+    expect(isPersonalAgentRunDetail(detail, "old")).toBe(true);
+    expect(isPersonalAgentRunDetail(detail, "foreign")).toBe(false);
+    expect(
+      isPersonalAgentRunDetail({ ...detail, run: { ...run, text: "x".repeat(16384) } }, "old"),
+    ).toBe(false);
+    expect(
+      isPersonalAgentRunDetail({ ...detail, attention: [{ id: "bad", runID: "foreign" }] }, "old"),
+    ).toBe(false);
+    const artifact = {
+      id: "artifact",
+      runID: "old",
+      name: "result.txt",
+      relativePath: "artifacts/result.txt",
+      createdAt: "now",
+    };
+    expect(
+      isPersonalAgentHistoryPage(
+        { ...page, collection: "artifacts", items: [artifact] },
+        { ...params, collection: "artifacts" },
+      ),
+    ).toBe(true);
+    expect(
+      isPersonalAgentRunDetail({ ...detail, artifacts: [artifact], totalArtifacts: 0 }, "old"),
+    ).toBe(false);
+  });
+  it("keeps legacy approval metadata readable but refuses a nonboolean answerable flag", () => {
+    const approval = {
+      id: "approval",
+      runID: "r",
+      tool: "read",
+      description: "Read",
+      createdAt: "now",
+    };
+    for (const value of [
+      approval,
+      { ...approval, answerable: true },
+      { ...approval, answerable: false },
+    ])
+      expect(isPersonalAgentSnapshot({ ...snapshot, attention: [value] })).toBe(true);
+    expect(
+      isPersonalAgentSnapshot({ ...snapshot, attention: [{ ...approval, answerable: "true" }] }),
+    ).toBe(false);
+  });
+  it("rejects overlapping cursors and permits skipped indices only for filtered history", () => {
+    const items = ["first", "second"].map((id) => ({
+      id,
+      conversationID: "c",
+      role: "assistant",
+      text: "Retained message",
+      createdAt: "now",
+    }));
+    const page = {
+      runtimeID: "runtime",
+      revision: 2,
+      collection: "messages",
+      items,
+      nextBefore: 10,
+    };
+    const params = { collection: "messages", before: 11, limit: 2 };
+    expect(isPersonalAgentHistoryPage(page, params)).toBe(false);
+    expect(isPersonalAgentHistoryPage(page, { ...params, conversationID: "c" })).toBe(false);
+    expect(isPersonalAgentHistoryPage({ ...page, nextBefore: 9 }, params)).toBe(true);
+    expect(isPersonalAgentHistoryPage({ ...page, nextBefore: 7 }, params)).toBe(false);
+    expect(
+      isPersonalAgentHistoryPage({ ...page, nextBefore: 7 }, { ...params, conversationID: "c" }),
+    ).toBe(true);
+  });
   it("accepts negotiated personal capability and bounded snapshots", () => {
     expect(
       isPersonalAgentHello({

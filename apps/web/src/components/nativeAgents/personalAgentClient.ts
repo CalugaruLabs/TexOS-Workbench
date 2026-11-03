@@ -2,8 +2,15 @@ import type {
   PersonalAgentHello,
   PersonalAgentMethod,
   PersonalAgentSnapshot,
+  PersonalAgentHistoryParams,
 } from "@t3tools/contracts";
-import { isPersonalAgentHello, isPersonalAgentSnapshot } from "@t3tools/shared/personalAgents";
+import {
+  decodePersonalAgentCommand,
+  isPersonalAgentHello,
+  isPersonalAgentSnapshot,
+  isPersonalAgentHistoryPage,
+  isPersonalAgentRunDetail,
+} from "@t3tools/shared/personalAgents";
 import { resolvePrimaryEnvironmentHttpUrl } from "../../environments/primary/target";
 
 export interface PersonalAgentClientState {
@@ -80,6 +87,7 @@ export class PersonalAgentClient {
   private source: SnapshotEvents | null = null;
   private generation = 0;
   private requiresFreshRead = false;
+  private readRevision = 0;
   constructor(private readonly transport: PersonalAgentTransport = personalAgentTransport) {}
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => {
@@ -100,6 +108,7 @@ export class PersonalAgentClient {
     )
       throw new Error("Personal agent snapshot does not match this workspace.");
     if (this.state.snapshot && value.revision < this.state.snapshot.revision) return;
+    this.readRevision = Math.max(this.readRevision, value.revision);
     this.patch({ snapshot: value });
   }
   async connect() {
@@ -110,6 +119,7 @@ export class PersonalAgentClient {
       if (generation !== this.generation) return;
       if (!isPersonalAgentHello(hello))
         throw new Error("This native build does not support personal agents.");
+      this.readRevision = 0;
       this.patch({ hello, snapshot: null, problem: null });
       await this.refresh();
       if (generation !== this.generation) return;
@@ -173,12 +183,32 @@ export class PersonalAgentClient {
     if (!this.state.connected || this.state.busy || this.state.snapshot?.revoked)
       throw new Error("Reconnect to this workspace before changing agent work.");
     const generation = this.generation;
+    const command = decodePersonalAgentCommand({ id: this.transport.uuid(), method, params });
     this.patch({ busy: true, problem: null });
     try {
-      const result = await this.transport.command(method, params, this.transport.uuid());
+      const result = await this.transport.command(method, params, command.id);
       if (generation !== this.generation)
         throw new Error("Workspace changed while the command was pending.");
-      if (method !== "agents.artifact") {
+      if (!this.state.connected || this.state.snapshot?.revoked)
+        throw new Error("Workspace access changed while the command was pending.");
+      if (method === "agents.history" || method === "agents.run") {
+        const valid =
+          method === "agents.history"
+            ? isPersonalAgentHistoryPage(result, params)
+            : isPersonalAgentRunDetail(result, params.runID);
+        if (
+          !valid ||
+          !result ||
+          typeof result !== "object" ||
+          !("runtimeID" in result) ||
+          result.runtimeID !== this.state.hello?.runtimeID ||
+          !("revision" in result) ||
+          Number(result.revision) < this.readRevision
+        )
+          throw new Error("Invalid or stale personal agent read response.");
+        if (result && typeof result === "object" && "revision" in result)
+          this.readRevision = Math.max(this.readRevision, Number(result.revision));
+      } else if (method !== "agents.artifact") {
         if (!result || typeof result !== "object" || !("snapshot" in result))
           throw new Error("Missing updated agent state.");
         this.accept(result.snapshot);
@@ -198,6 +228,17 @@ export class PersonalAgentClient {
     } finally {
       if (generation === this.generation) this.patch({ busy: false });
     }
+  }
+  async history(params: PersonalAgentHistoryParams) {
+    const input = { ...params };
+    const result = await this.command("agents.history", input);
+    if (!isPersonalAgentHistoryPage(result, input)) throw new Error("Invalid history page.");
+    return result;
+  }
+  async run(runID: string) {
+    const result = await this.command("agents.run", { runID });
+    if (!isPersonalAgentRunDetail(result, runID)) throw new Error("Invalid run detail.");
+    return result;
   }
 }
 

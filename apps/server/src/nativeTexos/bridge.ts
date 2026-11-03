@@ -13,6 +13,8 @@ import {
   decodePersonalAgentCommand,
   isPersonalAgentHello,
   isPersonalAgentSnapshot,
+  isPersonalAgentHistoryPage,
+  isPersonalAgentRunDetail,
 } from "@t3tools/shared/personalAgents";
 
 export type NativeProvider = "codex" | "claudeCode";
@@ -74,6 +76,8 @@ export class NativeBridge {
   private agentMode: PersonalAgentHello["mode"] | undefined;
   private agentAuthority: string | undefined;
   private agentSequence = -1;
+  private agentRevoked = false;
+  private agentRevision = 0;
   private pending = new Map<
     string,
     {
@@ -202,6 +206,8 @@ export class NativeBridge {
     this.agentMode = frame.snapshot.mode;
     if (Number(frame.sequence) <= this.agentSequence) return;
     this.agentSequence = Number(frame.sequence);
+    this.agentRevoked ||= frame.snapshot.revoked;
+    this.agentRevision = Math.max(this.agentRevision, frame.snapshot.revision);
     for (const listener of this.agentListeners) listener(frame as unknown as PersonalAgentEvent);
   }
   private receive(chunk: Buffer) {
@@ -346,11 +352,42 @@ export class NativeBridge {
   }
   async callAgents(value: unknown): Promise<PersonalAgentResponse> {
     const command = decodePersonalAgentCommand(value);
-    const hello = await this.agentsReady();
-    if (command.method === "agents.hello")
-      return { version: 2, kind: "response", id: command.id, ok: true, result: hello };
+    await this.agentsReady();
     const response = await this.requestAgents(command);
-    if (response.ok && command.method !== "agents.artifact") {
+    if (response.ok && command.method === "agents.hello") {
+      if (this.failure) throw this.failure;
+      if (
+        response.id !== command.id ||
+        !isPersonalAgentHello(response.result) ||
+        response.result.runtimeID !== this.agentRuntimeID ||
+        response.result.mode !== this.agentMode
+      )
+        this.protocolFailure("Invalid personal agent hello response binding.");
+    } else if (
+      response.ok &&
+      (command.method === "agents.history" || command.method === "agents.run")
+    ) {
+      const result = response.result;
+      const valid =
+        command.method === "agents.history"
+          ? isPersonalAgentHistoryPage(result, command.params)
+          : isPersonalAgentRunDetail(result, command.params.runID);
+      if (this.failure) throw this.failure;
+      if (
+        !valid ||
+        !result ||
+        typeof result !== "object" ||
+        !("runtimeID" in result) ||
+        result.runtimeID !== this.agentRuntimeID ||
+        !("revision" in result)
+      )
+        this.protocolFailure("Invalid personal agent read response.");
+      // A newer event can overtake a valid read; withhold it without closing shared work.
+      if (this.agentRevoked || Number(result.revision) < this.agentRevision)
+        throw new Error("Stale or revoked personal agent read response. Refresh state.");
+      if (result && typeof result === "object" && "revision" in result)
+        this.agentRevision = Math.max(this.agentRevision, Number(result.revision));
+    } else if (response.ok && command.method !== "agents.artifact") {
       const result = response.result;
       const snapshot =
         command.method === "agents.snapshot"
@@ -364,6 +401,10 @@ export class NativeBridge {
         snapshot.mode !== this.agentMode
       )
         this.protocolFailure("Invalid personal agent snapshot response.");
+      if (isPersonalAgentSnapshot(snapshot)) {
+        this.agentRevoked ||= snapshot.revoked;
+        this.agentRevision = Math.max(this.agentRevision, snapshot.revision);
+      }
     } else if (response.ok && command.method === "agents.artifact") {
       const result = response.result;
       if (

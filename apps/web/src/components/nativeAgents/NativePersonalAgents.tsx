@@ -289,7 +289,7 @@ export function NativePersonalAgents({
                         <div className="flex gap-2">
                           <Button
                             size="sm"
-                            disabled={disabled}
+                            disabled={disabled || item.answerable !== true}
                             onClick={() =>
                               void act("agents.answer", { attentionID: item.id, allow: true })
                             }
@@ -299,7 +299,7 @@ export function NativePersonalAgents({
                           <Button
                             size="sm"
                             variant="outline"
-                            disabled={disabled}
+                            disabled={disabled || item.answerable !== true}
                             onClick={() =>
                               void act("agents.answer", { attentionID: item.id, allow: false })
                             }

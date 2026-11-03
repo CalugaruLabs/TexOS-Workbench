@@ -43,7 +43,7 @@ export type PersonalAgentAttention = {
   description: string;
   createdAt: string;
 } & (
-  | { kind?: undefined }
+  | { kind?: undefined; answerable?: boolean }
   | {
       kind: "question";
       questions: PersonalAgentQuestion[];
@@ -90,6 +90,33 @@ export interface PersonalAgentHello {
   mode: "live" | "fake";
   capabilities: string[];
 }
+export type PersonalAgentMessage = PersonalAgentSnapshot["messages"][number];
+export type PersonalAgentArtifact = PersonalAgentSnapshot["artifacts"][number];
+export type PersonalAgentHistoryCollection = "runs" | "messages" | "artifacts";
+export interface PersonalAgentHistoryParams {
+  collection: PersonalAgentHistoryCollection;
+  before?: number;
+  limit?: number;
+  conversationID?: string;
+}
+export type PersonalAgentHistoryPage = {
+  nextBefore: number | null;
+  runtimeID: string;
+  revision: number;
+} & (
+  | { collection: "runs"; items: PersonalAgentRun[] }
+  | { collection: "messages"; items: PersonalAgentMessage[] }
+  | { collection: "artifacts"; items: PersonalAgentArtifact[] }
+);
+export interface PersonalAgentRunDetail {
+  run: PersonalAgentRun;
+  attention: PersonalAgentAttention[];
+  artifacts: PersonalAgentArtifact[];
+  totalAttention: number;
+  totalArtifacts: number;
+  runtimeID: string;
+  revision: number;
+}
 export const PERSONAL_AGENT_METHODS = [
   "agents.hello",
   "agents.snapshot",
@@ -101,6 +128,8 @@ export const PERSONAL_AGENT_METHODS = [
   "agents.respond",
   "agents.reconcile",
   "agents.artifact",
+  "agents.history",
+  "agents.run",
 ] as const;
 export type PersonalAgentMethod = (typeof PERSONAL_AGENT_METHODS)[number];
 export interface PersonalAgentCommand {

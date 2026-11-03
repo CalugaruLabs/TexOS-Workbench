@@ -180,6 +180,244 @@ const agentHello = {
   capabilities: ["agents.v2", "queue", "permissions", "events"],
 };
 describe("native personal agents v2", () => {
+  it("forwards caller hello UUIDs to the runtime identity registry independently of negotiation", async () => {
+    const p = peer();
+    const identities = new Map<string, string>();
+    p.setAnswer((request) => {
+      if (request.version === 1) {
+        p.respond(request, { ok: true, providers: ["codex"] });
+        return;
+      }
+      const id = String(request.id);
+      const fingerprint = JSON.stringify({ method: request.method, params: request.params });
+      const prior = identities.get(id);
+      if (prior !== undefined && prior !== fingerprint) {
+        p.input.write(
+          JSON.stringify({
+            version: 2,
+            kind: "response",
+            id,
+            ok: false,
+            error: { code: "conflict", message: "UUID content changed." },
+          }) + "\n",
+        );
+        return;
+      }
+      identities.set(id, fingerprint);
+      p.input.write(
+        JSON.stringify({
+          version: 2,
+          kind: "response",
+          id,
+          ok: true,
+          result:
+            request.method === "agents.hello"
+              ? agentHello
+              : {
+                  runtimeID: "personal-runtime",
+                  revision: 1,
+                  collection: "runs",
+                  items: [],
+                  nextBefore: null,
+                },
+        }) + "\n",
+      );
+    });
+    const helloID = randomUUID();
+    const helloCommand = { id: helloID, method: "agents.hello", params: {} };
+    await expect(p.client.callAgents(helloCommand)).resolves.toMatchObject({
+      id: helloID,
+      ok: true,
+    });
+    expect(p.requests.filter((request) => request.method === "agents.hello")).toHaveLength(2);
+    expect(p.requests[1]?.id).not.toBe(helloID);
+    expect(p.requests[2]?.id).toBe(helloID);
+    await expect(
+      p.client.callAgents({
+        id: helloID,
+        method: "agents.history",
+        params: { collection: "runs" },
+      }),
+    ).resolves.toMatchObject({ id: helloID, ok: false, error: { code: "conflict" } });
+    await expect(p.client.callAgents(helloCommand)).resolves.toMatchObject({
+      id: helloID,
+      ok: true,
+    });
+    const historyID = randomUUID();
+    await expect(
+      p.client.callAgents({
+        id: historyID,
+        method: "agents.history",
+        params: { collection: "runs" },
+      }),
+    ).resolves.toMatchObject({ id: historyID, ok: true });
+    await expect(p.client.callAgents({ ...helloCommand, id: historyID })).resolves.toMatchObject({
+      id: historyID,
+      ok: false,
+      error: { code: "conflict" },
+    });
+  });
+  it("rejects caller hello replies with changed runtime, mode or response identity", async () => {
+    for (const change of ["runtime", "mode", "id"]) {
+      const p = peer();
+      let negotiated = false;
+      p.setAnswer((request) => {
+        if (request.version === 1) {
+          p.respond(request, { ok: true, providers: ["codex"] });
+          return;
+        }
+        const result = negotiated
+          ? {
+              ...agentHello,
+              ...(change === "runtime" ? { runtimeID: "other" } : {}),
+              ...(change === "mode" ? { mode: "live" } : {}),
+            }
+          : agentHello;
+        const id = negotiated && change === "id" ? randomUUID() : request.id;
+        negotiated = true;
+        p.input.write(
+          JSON.stringify({ version: 2, kind: "response", id, ok: true, result }) + "\n",
+        );
+      });
+      await expect(
+        p.client.callAgents({ id: randomUUID(), method: "agents.hello", params: {} }),
+      ).rejects.toThrow();
+    }
+  });
+  it("validates history and run detail as reads bound to the negotiated runtime", async () => {
+    const p = peer();
+    const run = {
+      id: "old",
+      agentID: "a",
+      taskID: "t",
+      conversationID: "c",
+      status: "completed",
+      text: "retained",
+      createdAt: "now",
+      updatedAt: "now",
+    };
+    p.setAnswer((request) => {
+      if (request.version === 1) {
+        p.respond(request, { ok: true, providers: ["codex"] });
+        return;
+      }
+      const result =
+        request.method === "agents.hello"
+          ? agentHello
+          : request.method === "agents.history"
+            ? {
+                runtimeID: "personal-runtime",
+                revision: 1,
+                collection: "runs",
+                items: [run],
+                nextBefore: null,
+              }
+            : {
+                runtimeID: "personal-runtime",
+                revision: 1,
+                run,
+                attention: [],
+                artifacts: [],
+                totalAttention: 0,
+                totalArtifacts: 0,
+              };
+      p.input.write(
+        JSON.stringify({ version: 2, kind: "response", id: request.id, ok: true, result }) + "\n",
+      );
+    });
+    await expect(
+      p.client.callAgents({
+        id: randomUUID(),
+        method: "agents.history",
+        params: { collection: "runs" },
+      }),
+    ).resolves.toMatchObject({ ok: true, result: { items: [{ id: "old" }] } });
+    await expect(
+      p.client.callAgents({ id: randomUUID(), method: "agents.run", params: { runID: "old" } }),
+    ).resolves.toMatchObject({ ok: true, result: { run: { id: "old" } } });
+    expect(p.requests.every((request) => !("authorityID" in request))).toBe(true);
+  });
+  it("fails closed on malformed or foreign-runtime read results", async () => {
+    for (const result of [
+      { snapshot: agentSnapshot() },
+      { runtimeID: "foreign", revision: 1, collection: "runs", items: [], nextBefore: null },
+      { runtimeID: "personal-runtime", revision: 1, collection: "runs", items: [], nextBefore: -1 },
+    ]) {
+      const p = peer();
+      p.setAnswer((request) => {
+        if (request.version === 1) {
+          p.respond(request, { ok: true, providers: ["codex"] });
+          return;
+        }
+        p.input.write(
+          JSON.stringify({
+            version: 2,
+            kind: "response",
+            id: request.id,
+            ok: true,
+            result: request.method === "agents.hello" ? agentHello : result,
+          }) + "\n",
+        );
+      });
+      await expect(
+        p.client.callAgents({
+          id: randomUUID(),
+          method: "agents.history",
+          params: { collection: "runs" },
+        }),
+      ).rejects.toThrow("read response");
+    }
+  });
+  it("withholds read results overtaken by current revision or revocation events", async () => {
+    for (const revoked of [false, true]) {
+      const p = peer();
+      p.setAnswer((request) => {
+        if (request.version === 1) {
+          p.respond(request, { ok: true, providers: ["codex"] });
+          return;
+        }
+        if (request.method === "agents.history") {
+          p.input.write(
+            JSON.stringify({
+              version: 2,
+              kind: "event",
+              authorityID: "space-a",
+              sequence: 2,
+              event: "snapshot",
+              snapshot: { ...agentSnapshot(2), revoked },
+            }) + "\n",
+          );
+        }
+        p.input.write(
+          JSON.stringify({
+            version: 2,
+            kind: "response",
+            id: request.id,
+            ok: true,
+            result:
+              request.method === "agents.hello"
+                ? agentHello
+                : {
+                    runtimeID: "personal-runtime",
+                    revision: 1,
+                    collection: "runs",
+                    items: [],
+                    nextBefore: null,
+                  },
+          }) + "\n",
+        );
+      });
+      await expect(
+        p.client.callAgents({
+          id: randomUUID(),
+          method: "agents.history",
+          params: { collection: "runs" },
+        }),
+      ).rejects.toThrow("read response");
+      await expect(p.client.ready()).resolves.toMatchObject({ providers: ["codex"] });
+      expect(p.input.destroyed || p.output.destroyed).toBe(false);
+    }
+  });
   it("keeps v1 hello unchanged and separately negotiates v2 without caller authority", async () => {
     const p = peer();
     p.setAnswer((request) => {

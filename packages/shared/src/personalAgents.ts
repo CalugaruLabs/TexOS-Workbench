@@ -5,6 +5,8 @@ import {
   type PersonalAgentRunStatus,
   type PersonalAgentHello,
   type PersonalAgentSnapshot,
+  type PersonalAgentHistoryPage,
+  type PersonalAgentRunDetail,
 } from "@t3tools/contracts";
 
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -43,7 +45,8 @@ export const activePersonalAgentRun = (status: PersonalAgentRunStatus) =>
     "needsReconciliation",
   ].includes(status);
 const isQuestionAttention = (value: Record<string, unknown>) => {
-  if (value.kind === undefined) return true;
+  if (value.kind === undefined)
+    return value.answerable === undefined || typeof value.answerable === "boolean";
   if (
     value.kind !== "question" ||
     typeof value.isBlocking !== "boolean" ||
@@ -154,6 +157,101 @@ export function isPersonalAgentSnapshot(value: unknown): value is PersonalAgentS
         )))
   );
 }
+const readSnapshot = (value: Record<string, unknown>) => ({
+  revision: value.revision,
+  runtimeID: value.runtimeID,
+  mode: "live",
+  revoked: false,
+  agents: [],
+  runs: [],
+  messages: [],
+  attention: [],
+  artifacts: [],
+});
+const boundedText = (value: unknown, limit: number) =>
+  typeof value === "string" && new TextEncoder().encode(JSON.stringify(value)).length <= limit;
+const publicRun = (value: Record<string, unknown>, textLimit: number) =>
+  !("dispatchPhase" in value) &&
+  !("providerTurnID" in value) &&
+  boundedText(value.text, textLimit) &&
+  isPersonalAgentSnapshot({
+    ...readSnapshot({ revision: 0, runtimeID: "validation" }),
+    runs: [{ ...value, text: "" }],
+  });
+const readEnvelope = (value: unknown): value is Record<string, unknown> =>
+  record(value) &&
+  string(value.runtimeID, 256) &&
+  Boolean(value.runtimeID) &&
+  integer(value.revision) &&
+  new TextEncoder().encode(JSON.stringify(value)).length <= 980000;
+
+export function isPersonalAgentHistoryPage(
+  value: unknown,
+  params: Record<string, unknown>,
+): value is PersonalAgentHistoryPage {
+  if (
+    !readEnvelope(value) ||
+    value.collection !== params.collection ||
+    !Array.isArray(value.items) ||
+    value.items.length > Number(params.limit ?? 20) ||
+    value.items.length > 50 ||
+    !(value.nextBefore === null || (integer(value.nextBefore) && value.nextBefore > 0)) ||
+    (value.nextBefore !== null && value.items.length !== Number(params.limit ?? 20)) ||
+    (params.before !== undefined && value.items.length > Number(params.before)) ||
+    (params.before !== undefined &&
+      value.nextBefore !== null &&
+      (Number(value.nextBefore) + value.items.length > Number(params.before) ||
+        (params.conversationID === undefined &&
+          Number(value.nextBefore) + value.items.length !== Number(params.before))))
+  )
+    return false;
+  const projection = { ...readSnapshot(value), [String(value.collection)]: value.items };
+  if (value.collection === "runs") {
+    if (!list(value.items, 50, (run) => publicRun(run, 2048))) return false;
+  } else if (value.collection === "messages") {
+    if (
+      !isPersonalAgentSnapshot(projection) ||
+      !list(value.items, 50, (message) => boundedText(message.text, 4096))
+    )
+      return false;
+  } else if (value.collection === "artifacts") {
+    if (!isPersonalAgentSnapshot(projection)) return false;
+  } else return false;
+  return (
+    params.conversationID === undefined ||
+    value.collection === "artifacts" ||
+    value.items.every(
+      (item: unknown) => record(item) && item.conversationID === params.conversationID,
+    )
+  );
+}
+
+export function isPersonalAgentRunDetail(
+  value: unknown,
+  runID: unknown,
+): value is PersonalAgentRunDetail {
+  if (
+    !readEnvelope(value) ||
+    !record(value.run) ||
+    value.run.id !== runID ||
+    !publicRun(value.run, 16384) ||
+    !integer(value.totalAttention) ||
+    !integer(value.totalArtifacts) ||
+    !Array.isArray(value.attention) ||
+    !Array.isArray(value.artifacts) ||
+    !list(value.attention, 16, (item) => item.runID === runID) ||
+    !list(value.artifacts, 50, (item) => item.runID === runID) ||
+    value.totalAttention < value.attention.length ||
+    value.totalArtifacts < value.artifacts.length
+  )
+    return false;
+  return isPersonalAgentSnapshot({
+    ...readSnapshot(value),
+    attention: value.attention,
+    artifacts: value.artifacts,
+  });
+}
+
 export function decodePersonalAgentCommand(value: unknown): PersonalAgentCommand {
   if (
     !record(value) ||
@@ -177,10 +275,20 @@ export function decodePersonalAgentCommand(value: unknown): PersonalAgentCommand
     "agents.respond": ["attentionID", "answers"],
     "agents.reconcile": ["runID"],
     "agents.artifact": ["artifactID"],
+    "agents.history": ["collection", "before", "limit", "conversationID"],
+    "agents.run": ["runID"],
   };
   if (
     Object.keys(params).some((key) => !keys[method].includes(key)) ||
     Object.entries(params).some(([key, item]) => {
+      if (method === "agents.history") {
+        if (key === "before") return !integer(item);
+        if (key === "limit") return !integer(item) || item < 1 || item > 50;
+        if (key === "collection")
+          return typeof item !== "string" || !["runs", "messages", "artifacts"].includes(item);
+        if (key === "conversationID") return !questionString(item, 256) || !item.trim();
+      }
+      if (method === "agents.run") return !questionString(item, 256) || !item.trim();
       if (key === "allow") return typeof item !== "boolean";
       if (key === "answers")
         return (
@@ -213,6 +321,8 @@ export function decodePersonalAgentCommand(value: unknown): PersonalAgentCommand
     "agents.respond": ["attentionID", "answers"],
     "agents.reconcile": ["runID"],
     "agents.artifact": ["artifactID"],
+    "agents.history": ["collection"],
+    "agents.run": ["runID"],
   };
   if (
     required[method].some((key) => params[key] === undefined) ||

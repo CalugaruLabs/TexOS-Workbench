@@ -472,8 +472,15 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   const stageRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-archive-" });
   const contentDir = path.join(stageRoot, stem);
   yield* fs.makeDirectory(contentDir, { recursive: true });
-  const nodeLicense = path.join(repoRoot, "licenses", `Node-${rootPackageJson.engines.node}-LICENSE`);
-  yield* requireInput(nodeLicense, "Retain the matching official Node distribution license before packaging.");
+  const nodeLicense = path.join(
+    repoRoot,
+    "licenses",
+    `Node-${rootPackageJson.engines.node}-LICENSE`,
+  );
+  yield* requireInput(
+    nodeLicense,
+    "Retain the matching official Node distribution license before packaging.",
+  );
   yield* fs.copyFile(path.join(repoRoot, "LICENSE"), path.join(contentDir, "LICENSE.T3"));
   yield* fs.copyFile(nodeLicense, path.join(contentDir, "LICENSE.Node"));
 

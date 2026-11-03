@@ -127,6 +127,7 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
   readonly platform: BuildPlatform;
   readonly arch: BuildArch;
   readonly version: string;
+  readonly runtimeLockFile: Option.Option<string>;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -182,7 +183,13 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
     yield* fs.copy(path.join(input.repoRoot, "patches"), path.join(input.stageDir, "patches"));
   }
 
-  const install = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
+  if (Option.isSome(input.runtimeLockFile)) {
+    yield* fs.copyFile(input.runtimeLockFile.value, path.join(input.stageDir, "pnpm-lock.yaml"));
+  }
+  const install = yield* resolveSpawnCommand("vp", [
+    ...STAGE_INSTALL_ARGS,
+    ...(Option.isSome(input.runtimeLockFile) ? ["--frozen-lockfile"] : []),
+  ]);
   yield* runCommand(
     ChildProcess.make(install.command, install.args, {
       cwd: input.stageDir,
@@ -192,6 +199,17 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
     }),
     "vp install --prod (cli archive runtime externals)",
   );
+
+  // Retain the exact resolved runtime dependencies for upgrade review and rebuilding.
+  // These are provenance only; the installed server still uses the adjacent node_modules.
+  const provenanceDir = path.join(input.stageDir, "build-provenance");
+  yield* fs.makeDirectory(provenanceDir);
+  for (const entry of ["package.json", "pnpm-workspace.yaml", "pnpm-lock.yaml"]) {
+    yield* fs.copyFile(path.join(input.stageDir, entry), path.join(provenanceDir, entry));
+  }
+  if (Object.keys(patchedDependencies).length > 0) {
+    yield* fs.copy(path.join(input.stageDir, "patches"), path.join(provenanceDir, "patches"));
+  }
 
   const platformKey = cliArchivePlatformKey(input.platform, input.arch);
   const prebuildsDir = path.join(input.stageDir, "node_modules/node-pty/prebuilds");
@@ -413,6 +431,7 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   readonly version: string;
   readonly outputDir: string;
   readonly resourceMonitorDir: Option.Option<string>;
+  readonly runtimeLockFile: Option.Option<string>;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -453,6 +472,10 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   const stageRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-archive-" });
   const contentDir = path.join(stageRoot, stem);
   yield* fs.makeDirectory(contentDir, { recursive: true });
+  const nodeLicense = path.join(repoRoot, "licenses", `Node-${rootPackageJson.engines.node}-LICENSE`);
+  yield* requireInput(nodeLicense, "Retain the matching official Node distribution license before packaging.");
+  yield* fs.copyFile(path.join(repoRoot, "LICENSE"), path.join(contentDir, "LICENSE.T3"));
+  yield* fs.copyFile(nodeLicense, path.join(contentDir, "LICENSE.Node"));
 
   yield* Effect.log(`[cli-archive] Staging ${stem}...`);
   yield* fs.copyFile(builtExecutable, path.join(contentDir, executableName));
@@ -464,6 +487,7 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     platform: input.platform,
     arch: input.arch,
     version: input.version,
+    runtimeLockFile: input.runtimeLockFile,
   });
 
   const executablePath = path.join(contentDir, executableName);
@@ -525,6 +549,12 @@ const command = Command.make(
       Flag.withDescription("Release version for the archive name."),
     ),
     outputDir: Flag.String("output-dir").pipe(Flag.withDefault("release-cli")),
+    runtimeLockFile: Flag.String("runtime-lockfile").pipe(
+      Flag.withDescription(
+        "Exact previously reviewed runtime dependency lockfile; refuses dependency changes.",
+      ),
+      Flag.optional,
+    ),
     resourceMonitorDir: Flag.String("resource-monitor-dir").pipe(
       Flag.withDescription(
         "Directory laid out like dist/resource-monitor (defaults to apps/server/dist/resource-monitor).",

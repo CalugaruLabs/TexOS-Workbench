@@ -1,4 +1,7 @@
 export type PersonalAgentProvider = "codex" | "claudeCode";
+export type PersonalAgentExecutionCapability =
+  | { mode: "live" | "fake"; executionAvailable?: boolean }
+  | { mode: "observeOnly"; executionAvailable: false };
 export type PersonalAgentRunStatus =
   | "queued"
   | "running"
@@ -51,10 +54,9 @@ export type PersonalAgentAttention = {
       answerable: boolean;
     }
 );
-export interface PersonalAgentSnapshot {
+export type PersonalAgentSnapshot = PersonalAgentExecutionCapability & {
   revision: number;
   runtimeID: string;
-  mode: "live" | "fake";
   revoked: boolean;
   agents: PersonalAgent[];
   runs: PersonalAgentRun[];
@@ -82,14 +84,13 @@ export interface PersonalAgentSnapshot {
     messageLimit: number;
     textLimit: number;
   };
-}
-export interface PersonalAgentHello {
+};
+export type PersonalAgentHello = PersonalAgentExecutionCapability & {
   protocolVersion: 2;
   personalOnly: true;
   runtimeID: string;
-  mode: "live" | "fake";
   capabilities: string[];
-}
+};
 export type PersonalAgentMessage = PersonalAgentSnapshot["messages"][number];
 export type PersonalAgentArtifact = PersonalAgentSnapshot["artifacts"][number];
 export type PersonalAgentHistoryCollection = "runs" | "messages" | "artifacts";

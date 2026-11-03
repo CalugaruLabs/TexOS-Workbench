@@ -1,6 +1,9 @@
 import type { PersonalAgent, PersonalAgentMethod, PersonalAgentProvider } from "@t3tools/contracts";
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { activePersonalAgentRun } from "@t3tools/shared/personalAgents";
+import {
+  activePersonalAgentRun,
+  personalAgentExecutionAvailable,
+} from "@t3tools/shared/personalAgents";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
@@ -42,6 +45,11 @@ export function NativePersonalAgents({
   const snapshot = state.snapshot;
   const selected = snapshot?.agents.find((agent) => agent.id === selectedID) ?? snapshot?.agents[0];
   const disabled = !state.connected || state.busy || snapshot?.revoked === true;
+  const executionAvailable =
+    snapshot !== null &&
+    personalAgentExecutionAvailable(state.hello) &&
+    personalAgentExecutionAvailable(snapshot);
+  const executionDisabled = disabled || !executionAvailable;
   const runs = snapshot?.runs.filter((run) => run.agentID === selected?.id) ?? [];
   const runIDs = new Set(runs.map((run) => run.id));
   const attention = snapshot?.attention.filter((item) => runIDs.has(item.runID)) ?? [];
@@ -81,6 +89,9 @@ export function NativePersonalAgents({
             {state.hello.mode === "fake" ? (
               <strong className="text-warning-foreground">Test mode · simulated providers</strong>
             ) : null}
+            {state.hello.mode === "observeOnly" ? (
+              <span>Saved agents · new work unavailable</span>
+            ) : null}
             {snapshot?.revoked ? <span>Access revoked for this workspace</span> : null}
             <Button
               size="sm"
@@ -91,6 +102,11 @@ export function NativePersonalAgents({
               Refresh state
             </Button>
           </div>
+          {state.hello.mode === "observeOnly" ? (
+            <p className="px-6 pb-3 text-sm text-muted-foreground">
+              You can read saved conversations and results. Earlier work may still need checking.
+            </p>
+          ) : null}
           {state.problem ? (
             <p role="alert" className="px-6 pb-3 text-sm text-destructive">
               {state.problem}
@@ -249,7 +265,9 @@ export function NativePersonalAgents({
                               : run.status.replaceAll(/([A-Z])/g, " $1").toLowerCase()}
                           </span>
                           {run.error ? <span className="text-destructive">{run.error}</span> : null}
-                          {activePersonalAgentRun(run.status) && run.status !== "stopping" ? (
+                          {executionAvailable &&
+                          activePersonalAgentRun(run.status) &&
+                          run.status !== "stopping" ? (
                             <Button
                               size="sm"
                               variant="outline"
@@ -259,7 +277,7 @@ export function NativePersonalAgents({
                               Stop
                             </Button>
                           ) : null}
-                          {run.status === "needsReconciliation" ? (
+                          {executionAvailable && run.status === "needsReconciliation" ? (
                             <Button
                               size="sm"
                               variant="outline"
@@ -280,7 +298,9 @@ export function NativePersonalAgents({
                       {item.kind === "question" ? (
                         <PersonalAgentQuestionForm
                           attention={item}
-                          disabled={disabled || !state.hello?.capabilities.includes("questions")}
+                          disabled={
+                            executionDisabled || !state.hello?.capabilities.includes("questions")
+                          }
                           onRespond={(answers) =>
                             act("agents.respond", { attentionID: item.id, answers })
                           }
@@ -289,7 +309,7 @@ export function NativePersonalAgents({
                         <div className="flex gap-2">
                           <Button
                             size="sm"
-                            disabled={disabled || item.answerable !== true}
+                            disabled={executionDisabled || item.answerable !== true}
                             onClick={() =>
                               void act("agents.answer", { attentionID: item.id, allow: true })
                             }
@@ -299,7 +319,7 @@ export function NativePersonalAgents({
                           <Button
                             size="sm"
                             variant="outline"
-                            disabled={disabled || item.answerable !== true}
+                            disabled={executionDisabled || item.answerable !== true}
                             onClick={() =>
                               void act("agents.answer", { attentionID: item.id, allow: false })
                             }
@@ -314,6 +334,7 @@ export function NativePersonalAgents({
                     className="space-y-2"
                     onSubmit={(event) => {
                       event.preventDefault();
+                      if (executionDisabled || !text.trim()) return;
                       const submitted = text;
                       void act("agents.submit", { agentID: selected.id, text: submitted }).then(
                         (sent) => {
@@ -327,10 +348,10 @@ export function NativePersonalAgents({
                       placeholder={`Message ${selected.name}`}
                       value={text}
                       maxLength={8192}
-                      disabled={snapshot?.revoked}
+                      disabled={executionDisabled}
                       onChange={(event) => setText(event.target.value)}
                     />
-                    <Button size="sm" type="submit" disabled={disabled || !text.trim()}>
+                    <Button size="sm" type="submit" disabled={executionDisabled || !text.trim()}>
                       {runs.some((run) => activePersonalAgentRun(run.status))
                         ? "Queue message"
                         : "Send"}

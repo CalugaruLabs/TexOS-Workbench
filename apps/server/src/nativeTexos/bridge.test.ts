@@ -180,6 +180,68 @@ const agentHello = {
   capabilities: ["agents.v2", "queue", "permissions", "events"],
 };
 describe("native personal agents v2", () => {
+  it("passes observation reads and metadata but blocks execution before forwarding to native", async () => {
+    const p = peer();
+    const observed = { ...agentSnapshot(), mode: "observeOnly", executionAvailable: false };
+    p.setAnswer((request) => {
+      if (request.version === 1) {
+        p.respond(request, { ok: true, providers: ["codex"] });
+        return;
+      }
+      const result =
+        request.method === "agents.hello"
+          ? { ...agentHello, mode: "observeOnly", executionAvailable: false }
+          : request.method === "agents.snapshot"
+            ? observed
+            : request.method === "agents.history"
+              ? {
+                  runtimeID: observed.runtimeID,
+                  revision: 1,
+                  collection: "runs",
+                  items: [],
+                  nextBefore: null,
+                }
+              : { snapshot: observed };
+      p.input.write(
+        JSON.stringify({ version: 2, kind: "response", id: request.id, ok: true, result }) + "\n",
+      );
+    });
+    await expect(
+      p.client.callAgents({ id: randomUUID(), method: "agents.snapshot", params: {} }),
+    ).resolves.toMatchObject({ ok: true, result: observed });
+    await expect(
+      p.client.callAgents({
+        id: randomUUID(),
+        method: "agents.create",
+        params: { name: "Saved role", provider: "codex", instructions: "" },
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      p.client.callAgents({
+        id: randomUUID(),
+        method: "agents.history",
+        params: { collection: "runs" },
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    const before = p.requests.length;
+    const controls = [
+      { method: "agents.submit", params: { agentID: "a", text: "Must not run" } },
+      { method: "agents.stop", params: { runID: "r" } },
+      { method: "agents.reconcile", params: { runID: "r" } },
+      { method: "agents.answer", params: { attentionID: "a", allow: true } },
+      { method: "agents.respond", params: { attentionID: "a", answers: { q: ["No"] } } },
+    ];
+    for (const command of controls) {
+      await expect(p.client.callAgents({ id: randomUUID(), ...command })).resolves.toMatchObject({
+        ok: false,
+        error: { code: "executionUnavailable" },
+      });
+    }
+    expect(p.requests).toHaveLength(before);
+    await expect(
+      p.client.callAgents({ id: randomUUID(), method: "agents.snapshot", params: {} }),
+    ).resolves.toMatchObject({ ok: true, result: observed });
+  });
   it("forwards caller hello UUIDs to the runtime identity registry independently of negotiation", async () => {
     const p = peer();
     const identities = new Map<string, string>();

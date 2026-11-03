@@ -15,6 +15,8 @@ import {
   isPersonalAgentSnapshot,
   isPersonalAgentHistoryPage,
   isPersonalAgentRunDetail,
+  isPersonalAgentExecutionMethod,
+  personalAgentExecutionAvailable,
 } from "@t3tools/shared/personalAgents";
 
 export type NativeProvider = "codex" | "claudeCode";
@@ -77,6 +79,7 @@ export class NativeBridge {
   private agentAuthority: string | undefined;
   private agentSequence = -1;
   private agentRevoked = false;
+  private agentExecutionBlocked = false;
   private agentRevision = 0;
   private pending = new Map<
     string,
@@ -207,6 +210,7 @@ export class NativeBridge {
     if (Number(frame.sequence) <= this.agentSequence) return;
     this.agentSequence = Number(frame.sequence);
     this.agentRevoked ||= frame.snapshot.revoked;
+    this.agentExecutionBlocked ||= !personalAgentExecutionAvailable(frame.snapshot);
     this.agentRevision = Math.max(this.agentRevision, frame.snapshot.revision);
     for (const listener of this.agentListeners) listener(frame as unknown as PersonalAgentEvent);
   }
@@ -343,6 +347,7 @@ export class NativeBridge {
           this.protocolFailure("Personal agent runtime binding changed.");
         this.agentRuntimeID = frame.result.runtimeID;
         this.agentMode = frame.result.mode;
+        this.agentExecutionBlocked ||= !personalAgentExecutionAvailable(frame.result);
         return frame.result;
       })
       .catch((error: unknown) => {
@@ -353,6 +358,18 @@ export class NativeBridge {
   async callAgents(value: unknown): Promise<PersonalAgentResponse> {
     const command = decodePersonalAgentCommand(value);
     await this.agentsReady();
+    if (this.agentExecutionBlocked && isPersonalAgentExecutionMethod(command.method))
+      return {
+        version: 2,
+        kind: "response",
+        id: command.id,
+        ok: false,
+        error: {
+          code: "executionUnavailable",
+          message:
+            "Agent execution is not enabled on this connection. Saved agents and history remain available.",
+        },
+      };
     const response = await this.requestAgents(command);
     if (response.ok && command.method === "agents.hello") {
       if (this.failure) throw this.failure;
@@ -403,6 +420,7 @@ export class NativeBridge {
         this.protocolFailure("Invalid personal agent snapshot response.");
       if (isPersonalAgentSnapshot(snapshot)) {
         this.agentRevoked ||= snapshot.revoked;
+        this.agentExecutionBlocked ||= !personalAgentExecutionAvailable(snapshot);
         this.agentRevision = Math.max(this.agentRevision, snapshot.revision);
       }
     } else if (response.ok && command.method === "agents.artifact") {

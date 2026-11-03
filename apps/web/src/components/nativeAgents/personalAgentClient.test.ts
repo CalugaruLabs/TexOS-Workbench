@@ -23,7 +23,7 @@ const snapshot = (revision = 1) => ({
   attention: [],
   artifacts: [],
 });
-function fixture() {
+function fixture(negotiatedHello: unknown = hello) {
   const commands: Array<{ method: string; params: Record<string, unknown>; id: string }> = [];
   let counter = 0;
   let current: unknown = snapshot();
@@ -43,7 +43,7 @@ function fixture() {
       if (refusal && method === "agents.submit") throw refusal;
       if (method === "agents.history" || method === "agents.run") return readResult;
       return method === "agents.hello"
-        ? hello
+        ? negotiatedHello
         : method === "agents.snapshot"
           ? current
           : { runID: "run", snapshot: current };
@@ -73,6 +73,41 @@ function fixture() {
   };
 }
 describe("personal agent presentation client", () => {
+  it("keeps observation reads and metadata available while refusing every execution control locally", async () => {
+    const f = fixture({ ...hello, mode: "observeOnly", executionAvailable: false });
+    f.setSnapshot({ ...snapshot(), mode: "observeOnly", executionAvailable: false });
+    await f.client.connect();
+    expect(f.client.getSnapshot().connected).toBe(true);
+    await f.client.command("agents.create", {
+      name: "Saved role",
+      provider: "codex",
+      instructions: "",
+    });
+    f.setReadResult({
+      runtimeID: "r",
+      revision: 1,
+      collection: "messages",
+      items: [],
+      nextBefore: null,
+    });
+    await expect(f.client.history({ collection: "messages" })).resolves.toMatchObject({
+      items: [],
+    });
+    const before = f.commands.length;
+    for (const method of [
+      "agents.submit",
+      "agents.stop",
+      "agents.reconcile",
+      "agents.answer",
+      "agents.respond",
+    ] as const) {
+      await expect(f.client.command(method, {})).rejects.toThrow("not enabled");
+    }
+    expect(f.commands).toHaveLength(before);
+    expect(f.client.getSnapshot().connected).toBe(true);
+    expect(f.client.getSnapshot().snapshot?.mode).toBe("observeOnly");
+    f.client.disconnect();
+  });
   it("reads history and old run detail without replacing the current snapshot", async () => {
     const f = fixture();
     await f.client.connect();

@@ -20,6 +20,33 @@ const snapshot = {
   artifacts: [],
 };
 describe("personal agents presentation contract", () => {
+  it("requires an explicit non-executing observation capability on hello and snapshot", () => {
+    const hello = {
+      protocolVersion: 2,
+      personalOnly: true,
+      runtimeID: "runtime",
+      mode: "observeOnly",
+      executionAvailable: false,
+      capabilities: ["agents.v2", "events"],
+    };
+    expect(isPersonalAgentHello(hello)).toBe(true);
+    expect(
+      isPersonalAgentSnapshot({ ...snapshot, mode: "observeOnly", executionAvailable: false }),
+    ).toBe(true);
+    for (const executionAvailable of [undefined, null, true, "false", 0]) {
+      expect(isPersonalAgentHello({ ...hello, executionAvailable })).toBe(false);
+      expect(
+        isPersonalAgentSnapshot({ ...snapshot, mode: "observeOnly", executionAvailable }),
+      ).toBe(false);
+    }
+    for (const mode of ["live", "fake"]) {
+      expect(isPersonalAgentHello({ ...hello, mode, executionAvailable: undefined })).toBe(true);
+      expect(isPersonalAgentSnapshot({ ...snapshot, mode })).toBe(true);
+      expect(isPersonalAgentSnapshot({ ...snapshot, mode, executionAvailable: "false" })).toBe(
+        false,
+      );
+    }
+  });
   it("admits bounded runtime history and run parameters without authority overrides", () => {
     for (const params of [
       { collection: "runs" },

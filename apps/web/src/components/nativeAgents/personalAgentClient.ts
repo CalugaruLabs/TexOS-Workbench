@@ -10,6 +10,8 @@ import {
   isPersonalAgentSnapshot,
   isPersonalAgentHistoryPage,
   isPersonalAgentRunDetail,
+  isPersonalAgentExecutionMethod,
+  personalAgentExecutionAvailable,
 } from "@t3tools/shared/personalAgents";
 import { resolvePrimaryEnvironmentHttpUrl } from "../../environments/primary/target";
 
@@ -182,6 +184,16 @@ export class PersonalAgentClient {
   async command(method: PersonalAgentMethod, params: Record<string, unknown>) {
     if (!this.state.connected || this.state.busy || this.state.snapshot?.revoked)
       throw new Error("Reconnect to this workspace before changing agent work.");
+    if (
+      isPersonalAgentExecutionMethod(method) &&
+      (!this.state.hello ||
+        !this.state.snapshot ||
+        !personalAgentExecutionAvailable(this.state.hello) ||
+        !personalAgentExecutionAvailable(this.state.snapshot))
+    )
+      throw new Error(
+        "Agent execution is not enabled on this connection. Saved agents and history remain available.",
+      );
     const generation = this.generation;
     const command = decodePersonalAgentCommand({ id: this.transport.uuid(), method, params });
     this.patch({ busy: true, problem: null });

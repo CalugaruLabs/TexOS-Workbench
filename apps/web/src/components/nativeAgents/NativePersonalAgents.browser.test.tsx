@@ -10,12 +10,18 @@ import {
 } from "./personalAgentClient";
 import "../../index.css";
 
-function fixture(questionMode?: "answerable" | "stale", approvalAnswerable: boolean | null = true) {
+function fixture(
+  questionMode?: "answerable" | "stale",
+  approvalAnswerable: boolean | null = true,
+  observeOnly = false,
+) {
   const now = "2026-10-30T00:00:00Z";
   const snapshot: PersonalAgentSnapshot = {
     revision: 1,
     runtimeID: "synthetic-workbench-runtime",
-    mode: "fake",
+    ...(observeOnly
+      ? { mode: "observeOnly" as const, executionAvailable: false as const }
+      : { mode: "fake" as const }),
     revoked: false,
     agents: [
       {
@@ -156,7 +162,8 @@ function fixture(questionMode?: "answerable" | "stale", approvalAnswerable: bool
           protocolVersion: 2,
           personalOnly: true,
           runtimeID: snapshot.runtimeID,
-          mode: "fake",
+          mode: snapshot.mode,
+          ...(observeOnly ? { executionAvailable: false } : {}),
           capabilities: ["agents.v2", "queue", "permissions", "events", "questions"],
         };
       if (method === "agents.snapshot") return structuredClone(snapshot);
@@ -275,6 +282,80 @@ it("disables permission decisions when live answerability is false or absent", a
       .toBeDisabled();
     await expect.element(page.getByRole("button", { name: "Decline", exact: true })).toBeDisabled();
     expect(f.commands.some((command) => command.method === "agents.answer")).toBe(false);
+  }
+});
+
+it("keeps observation history, results and agent edits visible without execution or cessation claims", async () => {
+  for (const questionMode of [undefined, "answerable", "stale"] as const) {
+    const f = fixture(questionMode, true, true);
+    await using screen = await render(<NativePersonalAgents client={f.client} />, {
+      router: false,
+    });
+    await expect.element(screen.getByRole("button", { name: "Agents", exact: true })).toBeVisible();
+    await screen.getByRole("button", { name: "Agents", exact: true }).click();
+    await expect.element(page.getByText("Saved agents · new work unavailable")).toBeVisible();
+    await expect
+      .element(
+        page.getByText(
+          "The checklist is ready. It covers the objective, owner, review, and next action.",
+        ),
+      )
+      .toBeVisible();
+    await expect.element(page.getByRole("textbox", { name: "Message Builder" })).toBeDisabled();
+    await expect.element(page.getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+    await page.getByRole("button", { name: "work-brief.html", exact: true }).click();
+    await expect.element(page.getByTitle("work-brief.html")).toBeVisible();
+    await page.getByRole("button", { name: "Reviewer", exact: true }).click();
+    await expect
+      .element(page.getByRole("button", { name: "Stop", exact: true }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Inspect outcome", exact: true }))
+      .not.toBeInTheDocument();
+    if (questionMode === "answerable") {
+      await expect
+        .element(page.getByRole("button", { name: "Submit answers", exact: true }))
+        .toBeDisabled();
+    } else if (!questionMode) {
+      await expect
+        .element(page.getByRole("button", { name: "Allow once", exact: true }))
+        .toBeDisabled();
+      await expect
+        .element(page.getByRole("button", { name: "Decline", exact: true }))
+        .toBeDisabled();
+    }
+    await expect
+      .element(
+        page.getByText(
+          "You can read saved conversations and results. Earlier work may still need checking.",
+        ),
+      )
+      .toBeVisible();
+    await page.getByRole("button", { name: "Edit agent", exact: true }).click();
+    await page.getByRole("textbox", { name: "Name", exact: true }).fill("Saved reviewer");
+    await page.getByRole("button", { name: "Save agent", exact: true }).click();
+    await expect
+      .element(page.getByRole("heading", { name: "Saved reviewer", exact: true }))
+      .toBeVisible();
+    await page.getByRole("button", { name: "Refresh state", exact: true }).click();
+    expect(
+      f.commands.some((command) =>
+        [
+          "agents.submit",
+          "agents.stop",
+          "agents.reconcile",
+          "agents.answer",
+          "agents.respond",
+        ].includes(command.method),
+      ),
+    ).toBe(false);
+    expect(f.client.getSnapshot().snapshot?.runs[1]?.status).toBe(
+      questionMode === "stale"
+        ? "needsReconciliation"
+        : questionMode
+          ? "waitingForInput"
+          : "waitingForApproval",
+    );
   }
 });
 

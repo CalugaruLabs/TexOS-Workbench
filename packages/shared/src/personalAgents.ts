@@ -7,6 +7,7 @@ import {
   type PersonalAgentSnapshot,
   type PersonalAgentHistoryPage,
   type PersonalAgentRunDetail,
+  type PersonalAgentExecutionCapability,
 } from "@t3tools/contracts";
 
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -23,6 +24,17 @@ const list = (value: unknown, limit: number, check: (item: Record<string, unknow
   value.length <= limit &&
   value.every((item: unknown) => record(item) && check(item));
 const identified = (item: Record<string, unknown>) => string(item.id) && string(item.createdAt);
+const isExecutionCapability = (value: Record<string, unknown>) =>
+  value.mode === "observeOnly"
+    ? value.executionAvailable === false
+    : (value.mode === "live" || value.mode === "fake") &&
+      (value.executionAvailable === undefined || typeof value.executionAvailable === "boolean");
+export const personalAgentExecutionAvailable = (value: PersonalAgentExecutionCapability) =>
+  value.mode !== "observeOnly" && value.executionAvailable !== false;
+export const isPersonalAgentExecutionMethod = (method: PersonalAgentMethod) =>
+  ["agents.submit", "agents.stop", "agents.reconcile", "agents.answer", "agents.respond"].includes(
+    method,
+  );
 const statuses = new Set<string>([
   "queued",
   "running",
@@ -78,7 +90,7 @@ export function isPersonalAgentHello(value: unknown): value is PersonalAgentHell
     value.protocolVersion === 2 &&
     value.personalOnly === true &&
     string(value.runtimeID) &&
-    ["live", "fake"].includes(String(value.mode)) &&
+    isExecutionCapability(value) &&
     Array.isArray(value.capabilities) &&
     value.capabilities.length <= 64 &&
     value.capabilities.every((item: unknown) => string(item, 128)) &&
@@ -90,7 +102,7 @@ export function isPersonalAgentSnapshot(value: unknown): value is PersonalAgentS
     !record(value) ||
     !integer(value.revision) ||
     !string(value.runtimeID) ||
-    !["live", "fake"].includes(String(value.mode)) ||
+    !isExecutionCapability(value) ||
     typeof value.revoked !== "boolean"
   )
     return false;

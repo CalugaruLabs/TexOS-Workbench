@@ -1,10 +1,28 @@
 import { describe, expect, it } from "@effect/vitest";
 import { decodePersonalAgentCommand } from "@t3tools/shared/personalAgents";
 import { nativeCommandProblem, nativeHttpAllowed, nativeRpcAllowed } from "./profile.ts";
-import { decodeExecutionHostRequest, executionEnvelope } from "./executionProtocol.ts";
+import {
+  decodeExecutionHostRequest,
+  executionEnvelope,
+  EXECUTION_CAPABILITY,
+  MANAGED_EXECUTION_CAPABILITY,
+} from "./executionProtocol.ts";
 import { syntheticIntent, unicodeCanonicalFixture } from "./execution.testkit.ts";
 
 describe("private execution envelope", () => {
+  it("adds managed capability without changing controlled capability or granting renderer access", () => {
+    expect(EXECUTION_CAPABILITY).toBe("texos.execution.controlled-codex.v2");
+    expect(MANAGED_EXECUTION_CAPABILITY).toBe("texos.execution.managed-cli.v2");
+    expect(MANAGED_EXECUTION_CAPABILITY).not.toBe(EXECUTION_CAPABILITY);
+    expect(nativeRpcAllowed("execution.admit")).toBe(false);
+    expect(() =>
+      executionEnvelope({
+        ...syntheticIntent(),
+        qualified: true,
+        profileDirectory: "/caller/profile",
+      }),
+    ).toThrow();
+  });
   it("retains literal Unicode, combining marks and slashes in the Native mirror fixture", () => {
     const envelope = executionEnvelope({
       ...syntheticIntent(),

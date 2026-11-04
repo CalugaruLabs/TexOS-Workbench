@@ -4,6 +4,7 @@ import * as NodePath from "node:path";
 
 export const EXECUTION_NAMESPACE = "texos.execution";
 export const EXECUTION_CAPABILITY = "texos.execution.controlled-codex.v2";
+export const MANAGED_EXECUTION_CAPABILITY = "texos.execution.managed-cli.v2";
 export const AUTHORIZATION_CAPABILITY = "texos.execution.authorize.v2";
 export const EXECUTION_FRAME_BYTES = 64 * 1024;
 
@@ -51,6 +52,28 @@ export interface ExecutionChannelBinding {
   readonly authorityID: string;
   readonly hostID: string;
   readonly hostGeneration: string;
+}
+
+export interface ExecutionObservationKey {
+  readonly commandID: string;
+  readonly envelopeDigest: string;
+  readonly canonicalRunID: string;
+  readonly canonicalAttemptID: string;
+  readonly workerRequestID: string;
+  readonly runtimeID: string;
+  readonly childID: string;
+  readonly t3ThreadID: string;
+  readonly t3ProviderSessionID: string;
+}
+
+// Observations are not independent acceptance or authority to release a Native lease.
+export interface ManagedExecutionObservation {
+  readonly key: ExecutionObservationKey;
+  readonly outcome: "completed" | "failed" | "interrupted" | "unknown";
+  readonly closeAndJoin: "observed" | "unknown";
+  readonly transportAndParserDrain: "observed" | "unknown";
+  readonly adapterEventDrain: "observed" | "unknown";
+  readonly assistantCursor?: string;
 }
 
 interface Frame extends ExecutionChannelBinding {

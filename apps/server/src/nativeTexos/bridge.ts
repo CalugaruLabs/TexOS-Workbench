@@ -9,6 +9,13 @@ import * as NodeTimers from "node:timers";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import type * as NodeStream from "node:stream";
+import { PrivateExecutionChannel, type PrivateExecutionEndpoint } from "./executionChannel.ts";
+import {
+  EXECUTION_NAMESPACE,
+  EXECUTION_FRAME_BYTES,
+  decodeExecutionHostRequest,
+  type ExecutionChannelBinding,
+} from "./executionProtocol.ts";
 import {
   decodePersonalAgentCommand,
   isPersonalAgentHello,
@@ -63,6 +70,7 @@ export const MAX_NATIVE_FRAME = 1024 * 1024;
 
 /** A single host generation. EOF is permanent; it never reconnects or resends. */
 export class NativeBridge {
+  private executionChannel: PrivateExecutionChannel | undefined;
   private agentPending = new Map<
     string,
     {
@@ -122,6 +130,7 @@ export class NativeBridge {
   private fail(error: Error) {
     if (this.failure) return;
     this.failure = error;
+    this.executionChannel?.close();
     for (const entry of this.pending.values()) {
       NodeTimers.clearTimeout(entry.timer);
       entry.reject(error);
@@ -142,6 +151,27 @@ export class NativeBridge {
   }
   close() {
     this.fail(new Error("Native bridge closed."));
+  }
+  /** Native-owned pipe bootstrap must supply this binding; renderer/environment assertions cannot. */
+  installExecutionControl(binding: ExecutionChannelBinding, endpoint: PrivateExecutionEndpoint) {
+    if (this.failure || this.executionChannel)
+      throw new Error("Execution control cannot be rebound.");
+    this.executionChannel = new PrivateExecutionChannel(
+      binding,
+      endpoint,
+      (frame) => {
+        const bytes = Buffer.from(JSON.stringify(frame) + "\n");
+        if (
+          this.failure ||
+          bytes.length > EXECUTION_FRAME_BYTES ||
+          this.output.writableLength + bytes.length > MAX_NATIVE_FRAME
+        ) {
+          throw new Error("Execution control write unavailable.");
+        }
+        this.output.write(bytes);
+      },
+      () => this.fail(new Error("Execution control disconnected; inspect original command.")),
+    );
   }
   private protocolFailure(message: string): never {
     const error = new Error(message);
@@ -232,6 +262,29 @@ export class NativeBridge {
       this.buffer = this.buffer.subarray(newline + 1);
       try {
         const frame = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+        if (frame?.namespace === EXECUTION_NAMESPACE) {
+          if (newline > EXECUTION_FRAME_BYTES) throw new Error("Execution frame exceeds limit.");
+          if (this.executionChannel) this.executionChannel.receive(frame);
+          else {
+            const request = decodeExecutionHostRequest(frame);
+            this.output.write(
+              JSON.stringify({
+                version: 2,
+                namespace: EXECUTION_NAMESPACE,
+                kind: "response",
+                id: request.id,
+                authorityID: request.authorityID,
+                hostID: request.hostID,
+                hostGeneration: request.hostGeneration,
+                ...(request.method === "execution.hello"
+                  ? { ok: true, result: { capabilities: [] } }
+                  : { ok: false, error: { code: "executionUnavailable" } }),
+              }) + "\n",
+            );
+          }
+          continue;
+        }
+        if (frame?.namespace !== undefined) throw new Error("Unsupported native namespace.");
         if (frame?.version === 2) {
           this.receiveAgent(frame);
           continue;

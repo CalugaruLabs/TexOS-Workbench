@@ -37,6 +37,43 @@ function peer(timeoutMs = 1000) {
 }
 
 describe("native private bridge", () => {
+  it("does not advertise or execute host control without an installed private handler", async () => {
+    const p = peer();
+    const frame = {
+      version: 2,
+      namespace: "texos.execution",
+      kind: "request",
+      id: randomUUID(),
+      authorityID: "synthetic-authority",
+      hostID: "synthetic-host",
+      hostGeneration: "generation-1",
+      method: "execution.hello",
+      params: { capabilities: ["texos.execution.authorize.v2"] },
+    };
+    const first = once(p.output, "data");
+    p.input.write(JSON.stringify(frame) + "\n");
+    const [wire] = await first;
+    expect(JSON.parse(wire.toString())).toMatchObject({
+      namespace: "texos.execution",
+      ok: true,
+      result: { capabilities: [] },
+    });
+    const second = once(p.output, "data");
+    p.input.write(
+      JSON.stringify({
+        ...frame,
+        id: randomUUID(),
+        method: "execution.status",
+        params: { commandID: randomUUID(), envelopeDigest: "a".repeat(64) },
+      }) + "\n",
+    );
+    const [refused] = await second;
+    expect(JSON.parse(refused.toString())).toMatchObject({
+      ok: false,
+      error: { code: "executionUnavailable" },
+    });
+  });
+
   it("requires versioned hello before create and emits only canonical framed fields", async () => {
     const p = peer();
     const handle = randomUUID();

@@ -91,6 +91,10 @@
       "types": "./src/server/orchestrationInstructions.ts",
       "import": "./src/server/orchestrationInstructions.ts"
     },
+    "./server/OwnedAdapterEventBroker": {
+      "types": "./src/server/OwnedAdapterEventBroker.ts",
+      "import": "./src/server/OwnedAdapterEventBroker.ts"
+    },
     "./server/pathExpansion": {
       "types": "./src/server/pathExpansion.ts",
       "import": "./src/server/pathExpansion.ts"

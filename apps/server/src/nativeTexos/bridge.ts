@@ -75,6 +75,7 @@ export const MAX_NATIVE_FRAME = 1024 * 1024;
 /** A single host generation. EOF is permanent; it never reconnects or resends. */
 export class NativeBridge {
   private executionChannel: PrivateExecutionChannel | undefined;
+  private executionEndpointFactory: (() => PrivateExecutionEndpoint) | undefined;
   private agentPending = new Map<
     string,
     {
@@ -159,6 +160,15 @@ export class NativeBridge {
   }
   close() {
     this.fail(new Error("Native bridge closed."));
+  }
+  /**
+   * Arms execution control for the first `execution.hello` on this private pipe, which then
+   * supplies the binding. Only TexOS can write to the pipe, so the binding stays native-owned.
+   */
+  enableExecutionControl(factory: () => PrivateExecutionEndpoint) {
+    if (this.failure || this.executionChannel || this.executionEndpointFactory)
+      throw new Error("Execution control cannot be rebound.");
+    this.executionEndpointFactory = factory;
   }
   /** Native-owned pipe bootstrap must supply this binding; renderer/environment assertions cannot. */
   installExecutionControl(binding: ExecutionChannelBinding, endpoint: PrivateExecutionEndpoint) {
@@ -310,6 +320,21 @@ export class NativeBridge {
         const frame = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
         if (frame?.namespace === EXECUTION_NAMESPACE) {
           if (newline > EXECUTION_FRAME_BYTES) throw new Error("Execution frame exceeds limit.");
+          if (!this.executionChannel && this.executionEndpointFactory) {
+            const request = decodeExecutionHostRequest(frame);
+            if (request.method === "execution.hello") {
+              const factory = this.executionEndpointFactory;
+              this.executionEndpointFactory = undefined;
+              this.installExecutionControl(
+                {
+                  authorityID: request.authorityID,
+                  hostID: request.hostID,
+                  hostGeneration: request.hostGeneration,
+                },
+                factory(),
+              );
+            }
+          }
           if (this.executionChannel) this.executionChannel.receive(frame);
           else {
             const request = decodeExecutionHostRequest(frame);

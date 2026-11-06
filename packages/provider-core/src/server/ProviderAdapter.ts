@@ -39,6 +39,7 @@ import * as Schema from "effect/Schema";
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
 import type * as Stream from "effect/Stream";
+import type { OwnedAdapterEventConsumer } from "./OwnedAdapterEventBroker.ts";
 
 import type {
   ProviderSelectionTransitionInput,
@@ -546,6 +547,8 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly providerSessionId: ProviderSessionId;
   readonly providerSession: OrchestrationV2ProviderSession;
   readonly events: Stream.Stream<ProviderAdapterV2Event, ProviderAdapterV2Error>;
+  /** Prefix consumption only; absent by default and independent of process/parser/writer cessation. */
+  readonly ownedEventConsumer?: OwnedAdapterEventConsumer<ProviderAdapterV2Event>;
   /** Manager runtimes broadcast independent subscriptions; adapters may expose only a single-consumer stream. */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;

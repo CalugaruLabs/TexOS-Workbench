@@ -36,6 +36,9 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Cause from "effect/Cause";
+import * as Sink from "effect/Sink";
 import * as Predicate from "effect/Predicate";
 import * as FileSystem from "effect/FileSystem";
 import { MCP_APP_OUTPUT_KEY, readMcpAppReference } from "@t3tools/shared/mcpApp";
@@ -6739,4 +6742,236 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
     );
   });
+});
+
+describe("Codex owned event prefix integration", () => {
+  it.effect("unknown ownership API denies open before a profile lookup or provider factory", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let opens = 0,
+          profileReads = 0;
+        const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
+          ownedEvents: true,
+          instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+          settings: DEFAULT_CODEX_SETTINGS,
+          environment: {},
+          clientFactory: {
+            open: () =>
+              Effect.sync(() => {
+                opens++;
+              }).pipe(Effect.andThen(Effect.die("unexpected open"))),
+          },
+          resolveRuntime: Effect.sync(() => {
+            profileReads++;
+          }).pipe(Effect.andThen(Effect.die("unexpected profile lookup"))),
+          crypto: yield* Crypto.Crypto,
+          fileSystem: yield* FileSystem.FileSystem,
+          idAllocator: yield* IdAllocator.IdAllocatorV2,
+          serverConfig: yield* makeReplayServerConfig("owned-unavailable").pipe(Effect.orDie),
+        });
+        const result = yield* adapter
+          .openSession({
+            threadId: ThreadId.make("owned-unavailable"),
+            providerSessionId: ProviderSessionId.make("owned-unavailable"),
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+          })
+          .pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(result));
+        assert.equal(opens, 0);
+        assert.equal(profileReads, 0);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect(
+    "actual adapter and client require child exit, real parser EOF and handler-completed ACK",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const root = yield* fs.makeTempDirectoryScoped({ prefix: "owned-codex-adapter-" });
+          const answer = root + "/answer.ts";
+          const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+            ...CODEX_TEST_RUNTIME_POLICY,
+            cwd: root,
+          });
+          yield* fs.writeFileString(answer, "export const answer = 0;\n");
+          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const git = yield* spawner.spawn(ChildProcess.make("/usr/bin/git", ["init", root]));
+          assert.equal(yield* git.exitCode, 0);
+          const inbound = yield* Queue.unbounded<Uint8Array, Cause.Done<void>>();
+          const childExit = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+          const written = yield* Deferred.make<void>();
+          const nativeThreadId = "owned-codex-native-thread",
+            nativeTurnId = "owned-codex-native-turn";
+          const preamble = codexReplayPreamble({
+            nativeThreadId,
+            nativeTurnId,
+            prompt: "Edit only answer.ts",
+          });
+          const replies = new Map<string, unknown>();
+          for (const entry of preamble)
+            if (
+              entry.type === "emit_inbound" &&
+              typeof entry.frame === "object" &&
+              entry.frame !== null &&
+              Reflect.has(entry.frame, "result") &&
+              typeof entry.label === "string"
+            ) {
+              const value: unknown = Reflect.get(entry.frame, "result");
+              if (entry.label === "thread/start" && typeof value === "object" && value !== null) {
+                const thread: unknown = Reflect.get(value, "thread");
+                assert.ok(typeof thread === "object" && thread !== null);
+                replies.set(entry.label, {
+                  ...value,
+                  cwd: root,
+                  thread: { ...thread, projectId: null, cwd: root, path: root + "/session.jsonl" },
+                });
+              } else replies.set(entry.label, value);
+            }
+          const send = (frame: unknown) =>
+            Queue.offer(inbound, new TextEncoder().encode(JSON.stringify(frame) + "\n")).pipe(
+              Effect.asVoid,
+            );
+          let edits = 0;
+          const input = Sink.forEach((bytes: Uint8Array) =>
+            Effect.gen(function* () {
+              const frame = JSON.parse(new TextDecoder().decode(bytes)) as {
+                id?: number;
+                method: string;
+              };
+              if (frame.method === "initialized") return;
+              const result = replies.get(frame.method);
+              assert.ok(result, "Unexpected fake RPC: " + frame.method);
+              if (frame.method === "turn/start") {
+                assert.equal(edits++, 0);
+                yield* fs.writeFileString(answer, "export const answer = 42;\n");
+              }
+              yield* send({ id: frame.id, result });
+              if (frame.method === "turn/start") {
+                const turn =
+                  typeof result === "object" && result !== null
+                    ? Reflect.get(result, "turn")
+                    : undefined;
+                assert.ok(turn);
+                yield* send({
+                  method: "turn/completed",
+                  params: { threadId: nativeThreadId, turn: { ...turn, status: "completed" } },
+                });
+              }
+            }),
+          ).pipe(Sink.ensuring(Deferred.succeed(written, undefined)));
+          const handle: ChildProcessSpawner.ChildProcessHandle = {
+            "~effect/process/ChildProcessSpawner/ChildProcessHandle":
+              "~effect/process/ChildProcessSpawner/ChildProcessHandle",
+            pid: ChildProcessSpawner.ProcessId(9876),
+            exitCode: Deferred.await(childExit),
+            isRunning: Effect.succeed(true),
+            kill: () => Effect.die("No process fallback in owned fake"),
+            stdin: input,
+            stdout: Stream.fromQueue(inbound),
+            stderr: Stream.empty,
+            all: Stream.die("No second reader"),
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.empty,
+            unref: Effect.succeed(Effect.void),
+          };
+          const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
+            ownedEvents: true,
+            instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+            settings: DEFAULT_CODEX_SETTINGS,
+            environment: {},
+            clientFactory: {
+              open: () => Effect.die("No legacy factory fallback"),
+              openOwned: () =>
+                Layer.build(
+                  CodexClient.layerChildProcess(handle, { observeOwnedInput: true }),
+                ).pipe(
+                  Effect.flatMap((context) =>
+                    Effect.service(CodexClient.CodexAppServerClient).pipe(Effect.provide(context)),
+                  ),
+                ),
+            },
+            crypto: yield* Crypto.Crypto,
+            fileSystem: fs,
+            idAllocator: yield* IdAllocator.IdAllocatorV2,
+            serverConfig: yield* makeReplayServerConfig("owned-client").pipe(Effect.orDie),
+          });
+          const threadId = ThreadId.make("owned-codex-thread");
+          const runtime = yield* adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make("owned-codex-session"),
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            runtimePolicy,
+          });
+          const observation = CodexAdapterV2.getCodexOwnedEventLifecycle(runtime);
+          assert.ok(observation);
+          assert.strictEqual(observation.transport.transport, handle);
+          assert.equal(CodexAdapterV2.getCodexOwnedEventLifecycle({ ...runtime }), undefined);
+          const consumer = runtime.ownedEventConsumer;
+          assert.ok(consumer);
+          const seen = yield* Deferred.make<void>(),
+            release = yield* Deferred.make<void>();
+          const events: ProviderAdapter.ProviderAdapterV2Event[] = [];
+          yield* consumer
+            .consume((event) =>
+              Effect.sync(() => {
+                events.push(event);
+              }).pipe(
+                Effect.andThen(Deferred.succeed(seen, undefined)),
+                Effect.andThen(Deferred.await(release)),
+              ),
+            )
+            .pipe(Effect.forkScoped);
+          yield* consumer.started;
+          const providerThread = yield* runtime.ensureThread({
+            threadId,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            runtimePolicy,
+          });
+          const turnInput = makeCodexTestTurnInput({
+            threadId,
+            providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("owned-codex-attempt"),
+            text: "Edit only answer.ts",
+          });
+          yield* runtime.startTurn({
+            ...turnInput,
+            runtimePolicy,
+            appThread: { ...turnInput.appThread, worktreePath: root },
+          });
+          const sealing = yield* observation.seal("1 second").pipe(Effect.forkScoped);
+          yield* Deferred.await(written);
+          assert.equal(sealing.pollUnsafe(), undefined);
+          yield* Deferred.succeed(childExit, ChildProcessSpawner.ExitCode(0));
+          assert.equal(sealing.pollUnsafe(), undefined);
+          yield* Queue.end(inbound);
+          const fence = yield* Fiber.join(sealing);
+          yield* Deferred.await(seen);
+          const waiting = yield* consumer
+            .awaitPrefix(observation.generation, fence, { timeout: "1 second" })
+            .pipe(Effect.forkScoped);
+          assert.equal(waiting.pollUnsafe(), undefined);
+          yield* Deferred.succeed(release, undefined);
+          const proof = yield* Fiber.join(waiting);
+          assert.isAbove(
+            (yield* consumer.inspect(observation.generation, fence, proof)).highWater,
+            0,
+          );
+          assert.equal(edits, 1);
+          assert.equal(yield* fs.readFileString(answer), "export const answer = 42;\n");
+          assert.isTrue(events.some((event) => event.type === "turn.terminal"));
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
 });

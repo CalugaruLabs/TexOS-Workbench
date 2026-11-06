@@ -1,5 +1,6 @@
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -22,6 +23,86 @@ const encodeJsonl = (value: unknown) => encoder.encode(`${encodeUnknownJsonStrin
 const decodeJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
+  it.effect("owned observation is absent unless explicitly requested", () =>
+    Effect.gen(function* () {
+      const { stdio } = yield* makeInMemoryStdio();
+      const protocol = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({ stdio });
+      assert.equal(protocol.ownedInput, undefined);
+    }),
+  );
+
+  it.effect("owned EOF includes the final fragment and waits for the actual request handler", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const protocol = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        observeOwnedInput: true,
+        onRequest: () =>
+          Deferred.succeed(started, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.as({ accepted: true }),
+          ),
+      });
+      const owned = protocol.ownedInput;
+      assert.ok(owned);
+      yield* Queue.offer(input, encoder.encode('{"id":4,"method":"owned/test"}'));
+      yield* Queue.end(input);
+      yield* owned.inputEOF("1 second");
+      yield* Deferred.await(started);
+      const waiting = yield* owned.parserDispatch("1 second").pipe(Effect.forkScoped);
+      assert.equal(waiting.pollUnsafe(), undefined);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(waiting);
+      assert.deepEqual(yield* decodeJson(yield* Queue.take(output)), {
+        id: 4,
+        result: { accepted: true },
+      });
+      yield* owned.providerInput("1 second");
+    }),
+  );
+
+  it.effect.each([encoder.encode('{"method":'), new Uint8Array([0xe2, 0x82])])(
+    "owned parser rejects malformed final input even after physical EOF: %j",
+    (bytes) =>
+      Effect.gen(function* () {
+        const { stdio, input } = yield* makeInMemoryStdio();
+        const protocol = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+          stdio,
+          observeOwnedInput: true,
+        });
+        const owned = protocol.ownedInput;
+        assert.ok(owned);
+        yield* Queue.offer(input, bytes);
+        yield* Queue.end(input);
+        yield* owned.inputEOF("1 second");
+        assert.isTrue(Exit.isFailure(yield* owned.parserDispatch("1 second").pipe(Effect.exit)));
+      }),
+  );
+
+  it.effect("owned dispatch failure cannot become success through request error recovery", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const protocol = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        observeOwnedInput: true,
+        onRequest: () =>
+          Effect.fail(
+            new CodexError.CodexAppServerTransportError({
+              operation: "read-input-stream",
+              cause: "controlled failure",
+            }),
+          ),
+      });
+      const owned = protocol.ownedInput;
+      assert.ok(owned);
+      yield* Queue.offer(input, encodeJsonl({ id: 9, method: "owned/test" }));
+      yield* Queue.end(input);
+      assert.isTrue(Exit.isFailure(yield* owned.parserDispatch("1 second").pipe(Effect.exit)));
+    }),
+  );
+
   it.effect(
     "encodes requests without a jsonrpc field and routes inbound requests and notifications",
     () =>

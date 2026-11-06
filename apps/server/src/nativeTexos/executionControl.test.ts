@@ -13,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 import Migration from "../persistence/Migrations/070_NativeExecutionReceipts.ts";
+import { ManagedExecutionProvider } from "./executionManaged.ts";
 import * as Receipts from "./executionReceipts.ts";
 import {
   ControlledExecutionProvider,
@@ -77,6 +78,52 @@ function authorizer(
 }
 
 describe("private admitted execution", () => {
+  it.effect(
+    "managed and controlled XOR rejects both, and receipt recovery is explicit control activation",
+    () =>
+      Effect.gen(function* () {
+        const intent = yield* physicalIntent;
+        const store = yield* Receipts.ExecutionReceipts;
+        let recoveries = 0;
+        const count = { value: 0 };
+        const controlled = unavailableProvider(count);
+        const managed = ManagedExecutionProvider.of({
+          mode: "managed-cli-subscription",
+          available: true,
+          supports: () => true,
+          create: () =>
+            Effect.sync(() => {
+              count.value++;
+            }).pipe(
+              Effect.andThen(Effect.fail(new ExecutionControlError({ code: "mustNotCreate" }))),
+            ),
+          observation: () => undefined,
+        });
+        assert.equal(recoveries, 0);
+        const control = yield* makeExecutionControl(syntheticBinding).pipe(
+          Effect.provideService(ControlledExecutionProvider, controlled),
+          Effect.provideService(ManagedExecutionProvider, managed),
+          Effect.provideService(Receipts.ExecutionReceipts, {
+            ...store,
+            recoverInterrupted: Effect.sync(() => {
+              recoveries++;
+            }).pipe(Effect.andThen(store.recoverInterrupted)),
+          }),
+        );
+        assert.equal(recoveries, 1);
+        const native = authorizer(intent, yield* Clock.currentTimeMillis);
+        assert.deepEqual(
+          yield* control.handle(syntheticRequest("execution.hello", { capabilities: [] }), native),
+          { capabilities: [] },
+        );
+        assert.isTrue(
+          Exit.isFailure(
+            yield* Effect.exit(control.handle(syntheticRequest("execution.admit", intent), native)),
+          ),
+        );
+        assert.equal(count.value, 0);
+      }).pipe(Effect.scoped, Effect.provide(receiptsLayer)),
+  );
   it.effect(
     "missing native authorization or provider handler advertises nothing and starts nothing",
     () =>

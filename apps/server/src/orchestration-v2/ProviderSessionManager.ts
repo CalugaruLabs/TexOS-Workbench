@@ -1670,6 +1670,8 @@ export const layerWithOptions = (
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
       ): ProviderAdapter.ProviderAdapterV2SessionRuntime => {
+        // Subscriber delivery does not acknowledge the primary ingestion handler's event prefix.
+        const { ownedEventConsumer: _ownedEventConsumer, ...sharedRuntime } = runtime;
         const providerSessionId = runtime.providerSessionId;
         const subscribeEvents = makeEventSubscription(eventSubscribers);
         const turnMetrics = (operation: string, model?: string) =>
@@ -1683,7 +1685,7 @@ export const layerWithOptions = (
             },
           });
         return {
-          ...runtime,
+          ...sharedRuntime,
           subscribeEvents,
           events: Stream.unwrap(
             subscribeEvents.pipe(Effect.map((subscription) => subscription.events)),

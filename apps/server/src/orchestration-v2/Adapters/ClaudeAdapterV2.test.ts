@@ -14627,3 +14627,70 @@ describe("ClaudeAdapterV2 query message stream", () => {
     }),
   );
 });
+
+describe("Claude owned observation admission", () => {
+  it.effect.each([false, true])(
+    "owned=%s is unavailable without the concrete owned runner API",
+    (ownedEvents) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "owned-claude-admission-",
+          });
+          let opens = 0,
+            allocations = 0;
+          const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
+            ownedEvents,
+            instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+            settings: DEFAULT_CLAUDE_SETTINGS,
+            environment: {},
+            attachmentsDir,
+            fileSystem,
+            path: yield* Path.Path,
+            crypto: yield* Crypto.Crypto,
+            idAllocator: yield* IdAllocator.IdAllocatorV2,
+            queryRunner: {
+              allocateSessionId: Effect.sync(() => {
+                allocations++;
+                return "unexpected-native-id";
+              }),
+              open: () =>
+                Effect.sync(() => {
+                  opens++;
+                }).pipe(Effect.andThen(Effect.die("No query fallback"))),
+              forkSession: () => Effect.die("No fork fallback"),
+              subagentLaunchToolUseId: () => Effect.succeed(null),
+              assertComplete: Effect.void,
+            },
+          });
+          const result = yield* adapter
+            .openSession({
+              threadId: ThreadId.make("owned-admission"),
+              providerSessionId: ProviderSessionId.make("owned-admission"),
+              modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+              runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+                runtimeMode: "approval-required",
+                interactionMode: "default",
+                cwd: attachmentsDir,
+              }),
+            })
+            .pipe(Effect.exit);
+          if (ownedEvents) assert.isTrue(Exit.isFailure(result));
+          else {
+            assert.isTrue(Exit.isSuccess(result));
+            if (Exit.isSuccess(result)) {
+              assert.equal(result.value.ownedEventConsumer, undefined);
+              assert.equal(ClaudeAdapterV2.getClaudeOwnedEventLifecycle(result.value), undefined);
+            }
+          }
+          assert.equal(opens, 0);
+          assert.equal(allocations, 0);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+});

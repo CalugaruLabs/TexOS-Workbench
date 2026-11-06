@@ -71,8 +71,10 @@ describe("t3 theme", () => {
       yield* runCli(["theme", "set", "ocean", "--base-dir", baseDir]);
       yield* runCli(["theme", "clear", "--base-dir", baseDir]);
 
+      // A missing key decodes to the built-in default, so clearing must store an explicit empty value.
       const settings = readSettings(baseDir);
-      assert.equal(Object.hasOwn(settings, "defaultTheme"), false);
+      assert.equal(settings.defaultTheme, "");
+      assert.equal(Object.hasOwn(settings, "defaultThemeSetAt"), false);
       assert.equal(settings.enableProviderUpdateChecks, false);
     }),
   );

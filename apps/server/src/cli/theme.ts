@@ -4,6 +4,7 @@
 import * as NodeFS from "node:fs";
 
 import {
+  DEFAULT_ENVIRONMENT_THEME,
   EnvironmentThemeFile,
   EnvironmentThemeId,
   environmentThemeFileHasColors,
@@ -208,11 +209,13 @@ const writeDefaultTheme = Effect.fn(function* (input: {
       input.themeId.length > 0
         ? // The timestamp lets clients reapply the same theme.
           { ...settings, defaultTheme: input.themeId, defaultThemeSetAt: setAt }
-        : Object.fromEntries(
-            Object.entries(settings).filter(
-              ([key]) => key !== "defaultTheme" && key !== "defaultThemeSetAt",
+        : // A missing key decodes to the built-in default, so clearing stores an explicit empty value.
+          {
+            ...Object.fromEntries(
+              Object.entries(settings).filter(([key]) => key !== "defaultThemeSetAt"),
             ),
-          );
+            defaultTheme: "",
+          };
 
     const contents = yield* encodeSettingsJson(next);
     const current = yield* fs
@@ -463,8 +466,9 @@ const themeShowCommand = Command.make("show", { baseDir: baseDirFlag }).pipe(
     Effect.gen(function* () {
       const paths = yield* resolveThemePaths(flags.baseDir);
       const { settings } = yield* readSettingsObject(paths.settingsPath);
-      const defaultTheme =
-        typeof settings.defaultTheme === "string" && settings.defaultTheme.length > 0
+      const defaultTheme = !Object.hasOwn(settings, "defaultTheme")
+        ? DEFAULT_ENVIRONMENT_THEME
+        : typeof settings.defaultTheme === "string" && settings.defaultTheme.length > 0
           ? settings.defaultTheme
           : null;
 

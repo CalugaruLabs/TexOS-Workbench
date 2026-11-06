@@ -261,6 +261,7 @@ export type FontFamilyPreference = typeof FontFamilyPreference.Type;
 export const DefaultThemePreference = Schema.String.check(Schema.isMaxLength(64));
 // Excluded from RPC patches so t3 theme set can validate syntax and resolvability.
 export type DefaultThemePreference = typeof DefaultThemePreference.Type;
+export const DEFAULT_ENVIRONMENT_THEME: DefaultThemePreference = "texos";
 
 export const DEFAULT_BROWSER_VIEWPORT: PreviewViewportSetting = FILL_PREVIEW_VIEWPORT;
 export const DEFAULT_BROWSER_AUTO_SHOW_FLOATING_PREVIEW = true;
@@ -1203,7 +1204,9 @@ export const ServerSettings = Schema.Struct({
   backgroundActivityProfile: BackgroundActivityProfile.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_BACKGROUND_ACTIVITY_PROFILE)),
   ),
-  defaultTheme: DefaultThemePreference.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  defaultTheme: DefaultThemePreference.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_ENVIRONMENT_THEME)),
+  ),
   /** Distinguishes repeated sets of the same theme so clients apply each one. */
   defaultThemeSetAt: Schema.String.check(Schema.isMaxLength(64)).pipe(
     Schema.withDecodingDefault(Effect.succeed("")),

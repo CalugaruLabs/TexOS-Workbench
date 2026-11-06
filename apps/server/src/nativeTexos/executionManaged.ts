@@ -156,19 +156,25 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
             }),
           );
         };
+        let interruptSent = false;
+        // A stop can land before the turn id is known, so every point that learns it re-checks.
+        const interruptIfStopping = Effect.suspend(() => {
+          if (!stopping || interruptSent || !runtime || !providerThread || !providerTurnID)
+            return Effect.void;
+          interruptSent = true;
+          return runtime
+            .interruptTurn({
+              providerThread,
+              providerTurnId: providerTurnID as Parameters<
+                typeof runtime.interruptTurn
+              >[0]["providerTurnId"],
+            })
+            .pipe(Effect.ignore);
+        });
         return {
-          stop: Effect.gen(function* () {
+          stop: Effect.sync(() => {
             stopping = true;
-            if (runtime && providerThread && providerTurnID)
-              yield* runtime
-                .interruptTurn({
-                  providerThread,
-                  providerTurnId: providerTurnID as Parameters<
-                    typeof runtime.interruptTurn
-                  >[0]["providerTurnId"],
-                })
-                .pipe(Effect.ignore);
-          }),
+          }).pipe(Effect.andThen(interruptIfStopping)),
           run: Effect.scoped(
             Effect.gen(function* () {
               yield* beforeProviderStart;
@@ -439,6 +445,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                       )
                         publish({ assistantCursor: turn.nativeTurnRef.nativeId });
                       yield* recordMappings(mappings);
+                      yield* interruptIfStopping;
                     }
                     if (event.type === "turn.terminal") {
                       if (!providerTurnID || event.providerTurnId !== providerTurnID)
@@ -511,6 +518,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                   runtimePolicy,
                 }),
               );
+              yield* interruptIfStopping;
               yield* Deferred.await(terminal);
               if (closeOwnedQuery) yield* closeOwnedQuery.pipe(Effect.ignore);
               if (lifecycle) {

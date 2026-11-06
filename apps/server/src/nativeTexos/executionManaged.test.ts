@@ -424,7 +424,10 @@ const setup = Effect.fn("ManagedExecutionTest.setup")(function* (
             beforeEmitInbound: (entry) =>
               entry.label === "edit" ? edit().pipe(Effect.orDie) : Effect.void,
           });
-          const context = yield* Layer.build(CodexReplay.layerReplayWithDriver(driver));
+          const handle = yield* CodexReplay.makeReplayChildProcess(driver);
+          const context = yield* Layer.build(
+            CodexClient.layerChildProcess(handle, { observeOwnedInput: true }),
+          );
           const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
             Effect.provide(context),
           );
@@ -621,7 +624,7 @@ describe("control through private binding and actual managed lower adapters", ()
       }).pipe(Effect.scoped, Effect.provide(layers)),
   );
   it.effect.each(["codex", "claudeCode"] as const)(
-    "%s edits once through its actual adapter and keeps unproven event drain uncertain",
+    "%s edits once through its actual adapter; only an owned drain proof settles the attempt",
     (provider) =>
       Effect.gen(function* () {
         const f = yield* setup(provider);
@@ -650,16 +653,18 @@ describe("control through private binding and actual managed lower adapters", ()
         assert.equal(f.counts().edits, 1);
         assert.equal(f.counts().opens, 1);
         assert.lengthOf(f.outcomes, 1, "the actual wrapper must return, not fail into uncertainty");
-        assert.isFalse(f.outcomes[0]?.drained);
-        assert.equal(saved?.phase, "uncertain");
-        assert.isFalse(saved?.drained);
+        // Codex runs owned and proves its event prefix; Claude is not owned yet and stays unproven.
+        const proven = provider === "codex";
+        assert.equal(f.outcomes[0]?.drained, proven);
+        assert.equal(saved?.phase, proven ? "attemptFinished" : "uncertain");
+        assert.equal(saved?.drained, proven);
         assert.isString(saved?.mappings.providerThreadID);
         assert.isString(saved?.mappings.providerTurnID);
         const observation = f.managed.observation(f.intent.commandID);
         assert.equal(observation?.outcome, "completed");
         assert.equal(observation?.closeAndJoin, "observed");
         assert.equal(observation?.transportAndParserDrain, "observed");
-        assert.equal(observation?.adapterEventDrain, "unknown");
+        assert.equal(observation?.adapterEventDrain, proven ? "observed" : "unknown");
         if (provider === "claudeCode") {
           assert.equal(saved?.mappings.nativeThreadID, nativeSession);
           assert.isUndefined(saved?.mappings.nativeTurnID);
@@ -682,7 +687,7 @@ describe("control through private binding and actual managed lower adapters", ()
           syntheticRequest("execution.admit", f.intent),
           currentNative,
         );
-        assert.equal("phase" in oldView ? oldView.phase : undefined, "uncertain");
+        assert.equal("phase" in oldView ? oldView.phase : undefined, saved?.phase);
         assert.equal(fixtureFactories, 0);
         const reopened = yield* makeExecutionControl(syntheticBinding).pipe(
           Effect.provideService(ManagedExecutionProvider, f.managed),

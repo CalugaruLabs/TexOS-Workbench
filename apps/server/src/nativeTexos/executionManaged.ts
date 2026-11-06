@@ -55,7 +55,6 @@ interface OwnedLifecycle {
   readonly transportAndParserDrain: Effect.Effect<void, OwnedExecutionTransportError>;
 }
 
-// No production supplier: stock adapters cannot currently prove complete owned event drain.
 export interface ManagedExecutionTransports {
   readonly codex?: {
     readonly open: (
@@ -103,6 +102,7 @@ export class ManagedExecutionProvider extends Context.Service<
 >()("t3/nativeTexos/executionManaged/ManagedExecutionProvider") {}
 
 const decodeCodex = Schema.decodeSync(CodexSettings);
+const OWNED_DRAIN_TIMEOUT = "5 seconds";
 const decodeClaude = Schema.decodeSync(ClaudeSettings);
 
 export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.make")(function* (
@@ -254,11 +254,18 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                         fileSystem: fs,
                         idAllocator: allocator,
                         serverConfig: config,
+                        ownedEvents: true,
                         clientFactory: {
-                          open: Effect.fn("ManagedExecutionProvider.openCodex")(
+                          open: () =>
+                            Effect.die("Managed Codex execution requires its owned transport"),
+                          openOwned: Effect.fn("ManagedExecutionProvider.openCodex")(
                             function* (input) {
                               yield* checkedStart;
                               const owned = yield* transports!.codex!.open(input, bound);
+                              if (!owned.client.ownedTransport)
+                                return yield* new OwnedExecutionTransportError({
+                                  operation: "ownedTransportMissing",
+                                });
                               lifecycle = owned;
                               const request: typeof owned.client.request = (method, payload) =>
                                 method === "turn/start"
@@ -417,55 +424,64 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
               yield* recordMappings(mappings);
               const terminal = yield* Deferred.make<void>();
               let eventStreamSucceeded = false;
-              yield* runtime.events.pipe(
-                Stream.runForEach((event) =>
-                  Effect.gen(function* () {
-                    if (event.type === "provider_turn.updated") {
-                      const turn = event.providerTurn;
-                      if (
-                        turn.providerThreadId !== mappings.providerThreadID ||
-                        turn.runAttemptId !== intent.canonicalAttemptID ||
-                        turn.nodeId !== receipt.childID ||
-                        (providerTurnID !== undefined && providerTurnID !== turn.id)
-                      )
-                        return yield* new ExecutionControlError({
-                          code: "managedTurnIdentityMismatch",
-                        });
-                      providerTurnID = turn.id;
-                      mappings.providerTurnID = turn.id;
-                      if (
-                        intent.configuration.provider === "codex" &&
-                        turn.nativeTurnRef?.strength === "strong" &&
-                        turn.nativeTurnRef.nativeId
-                      )
-                        mappings.nativeTurnID = turn.nativeTurnRef.nativeId;
-                      if (
-                        intent.configuration.provider === "claudeCode" &&
-                        turn.nativeTurnRef?.nativeId
-                      )
-                        publish({ assistantCursor: turn.nativeTurnRef.nativeId });
-                      yield* recordMappings(mappings);
-                      yield* interruptIfStopping;
-                    }
-                    if (event.type === "turn.terminal") {
-                      if (!providerTurnID || event.providerTurnId !== providerTurnID)
-                        return yield* new ExecutionControlError({
-                          code: "managedTerminalIdentityMismatch",
-                        });
-                      publish({
-                        outcome: event.status === "cancelled" ? "interrupted" : event.status,
-                      });
-                      yield* Deferred.succeed(terminal, undefined);
-                    }
-                  }),
-                ),
-                Effect.onExit((exit) =>
-                  Effect.sync(() => {
-                    eventStreamSucceeded = Exit.isSuccess(exit);
-                  }).pipe(Effect.andThen(Deferred.succeed(terminal, undefined))),
-                ),
-                Effect.forkScoped,
-              );
+              const handleEvent = Effect.fn("ManagedExecutionProvider.handleEvent")(function* (
+                event: ProviderAdapter.ProviderAdapterV2Event,
+              ) {
+                if (event.type === "provider_turn.updated") {
+                  const turn = event.providerTurn;
+                  if (
+                    turn.providerThreadId !== mappings.providerThreadID ||
+                    turn.runAttemptId !== intent.canonicalAttemptID ||
+                    turn.nodeId !== receipt.childID ||
+                    (providerTurnID !== undefined && providerTurnID !== turn.id)
+                  )
+                    return yield* new ExecutionControlError({
+                      code: "managedTurnIdentityMismatch",
+                    });
+                  providerTurnID = turn.id;
+                  mappings.providerTurnID = turn.id;
+                  if (
+                    intent.configuration.provider === "codex" &&
+                    turn.nativeTurnRef?.strength === "strong" &&
+                    turn.nativeTurnRef.nativeId
+                  )
+                    mappings.nativeTurnID = turn.nativeTurnRef.nativeId;
+                  if (
+                    intent.configuration.provider === "claudeCode" &&
+                    turn.nativeTurnRef?.nativeId
+                  )
+                    publish({ assistantCursor: turn.nativeTurnRef.nativeId });
+                  yield* recordMappings(mappings);
+                  yield* interruptIfStopping;
+                }
+                if (event.type === "turn.terminal") {
+                  if (!providerTurnID || event.providerTurnId !== providerTurnID)
+                    return yield* new ExecutionControlError({
+                      code: "managedTerminalIdentityMismatch",
+                    });
+                  publish({
+                    outcome: event.status === "cancelled" ? "interrupted" : event.status,
+                  });
+                  yield* Deferred.succeed(terminal, undefined);
+                }
+              });
+              const ownedConsumer = runtime.ownedEventConsumer;
+              if (ownedConsumer) {
+                yield* ownedConsumer.consume(handleEvent).pipe(
+                  Effect.onExit(() => Deferred.succeed(terminal, undefined)),
+                  Effect.forkScoped,
+                );
+                yield* ownedConsumer.started;
+              } else
+                yield* runtime.events.pipe(
+                  Stream.runForEach(handleEvent),
+                  Effect.onExit((exit) =>
+                    Effect.sync(() => {
+                      eventStreamSucceeded = Exit.isSuccess(exit);
+                    }).pipe(Effect.andThen(Deferred.succeed(terminal, undefined))),
+                  ),
+                  Effect.forkScoped,
+                );
               const now = yield* DateTime.now;
               const appThread: OrchestrationV2AppThread = {
                 id: threadId,
@@ -520,6 +536,35 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
               );
               yield* interruptIfStopping;
               yield* Deferred.await(terminal);
+              const drainUnproven = () =>
+                new ExecutionControlError({ code: "managedEventDrainUnproven" });
+              const codexLifecycle =
+                intent.configuration.provider === "codex"
+                  ? Codex.getCodexOwnedEventLifecycle(runtime)
+                  : undefined;
+              const claudeLifecycle =
+                intent.configuration.provider === "claudeCode"
+                  ? Claude.getClaudeOwnedEventLifecycle(runtime)
+                  : undefined;
+              const ownedGeneration = codexLifecycle?.generation ?? claudeLifecycle?.generation;
+              // Seal closes input and waits for the child, parser and handlers, so the proof
+              // means every event the provider produced was handled.
+              const sealOwned = codexLifecycle
+                ? codexLifecycle.seal(OWNED_DRAIN_TIMEOUT).pipe(Effect.mapError(drainUnproven))
+                : claudeLifecycle
+                  ? claudeLifecycle.seal(OWNED_DRAIN_TIMEOUT).pipe(Effect.mapError(drainUnproven))
+                  : undefined;
+              if (ownedConsumer && ownedGeneration && sealOwned) {
+                const proven = yield* sealOwned.pipe(
+                  Effect.flatMap((fence) =>
+                    ownedConsumer
+                      .awaitPrefix(ownedGeneration, fence, { timeout: OWNED_DRAIN_TIMEOUT })
+                      .pipe(Effect.mapError(drainUnproven)),
+                  ),
+                  Effect.exit,
+                );
+                eventStreamSucceeded = Exit.isSuccess(proven);
+              }
               if (closeOwnedQuery) yield* closeOwnedQuery.pipe(Effect.ignore);
               if (lifecycle) {
                 const joined = yield* Effect.exit(lifecycle.closeAndJoin);
@@ -532,8 +577,8 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                   publish({ transportAndParserDrain: "observed" });
                 else publish({ outcome: "unknown" });
               }
-              // Cancellation/scope finalizers cannot turn the adapter's unbounded event queue into EOF.
-              if (eventStreamSucceeded) publish({ adapterEventDrain: "observed" });
+              // Only an owned prefix proof counts; the legacy queue never reaches EOF.
+              if (eventStreamSucceeded && ownedConsumer) publish({ adapterEventDrain: "observed" });
               const final = observations.get(intent.commandID)!;
               return {
                 mappings,

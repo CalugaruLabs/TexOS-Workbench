@@ -5268,7 +5268,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               };
             }
           }
-          return emitOwned(event).pipe(Effect.andThen(Queue.offer(events, event)), Effect.asVoid);
+          // Owned runtimes are read through the broker alone; a second queue would never drain.
+          return (ownedBroker ? emitOwned(event) : Queue.offer(events, event)).pipe(Effect.asVoid);
         };
 
         const persistAttachmentBudget = Effect.fnUntraced(function* (nativeThreadId: string) {

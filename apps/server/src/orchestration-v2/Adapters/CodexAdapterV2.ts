@@ -1971,6 +1971,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const latestGoalTurnId = (providerTurnId: ProviderTurnId) =>
           goalRuns.get(providerTurnId)?.at(-1)?.providerTurnId ?? providerTurnId;
 
+        // Owned runtimes are read through the broker alone; a second queue would never drain.
         const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
           (owned
             ? produce(
@@ -1981,8 +1982,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   yield* owned.broker.emit(producer, event);
                 }),
               ).pipe(Effect.orDie)
-            : Effect.void
-          ).pipe(Effect.andThen(Queue.offer(events, event)), Effect.asVoid);
+            : Queue.offer(events, event)
+          ).pipe(Effect.asVoid);
 
         // Setting a goal passes through cleared and paused states; publish only the result.
         const goalUpdatesHeld = new Set<string>();

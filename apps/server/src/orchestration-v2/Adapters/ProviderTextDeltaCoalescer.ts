@@ -1,8 +1,13 @@
 import * as Duration from "effect/Duration";
+import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
+import type { OwnedEventDrainUnknown } from "@t3tools/provider-core/server/OwnedAdapterEventBroker";
 
 export interface ProviderTextDeltaUpdate {
   readonly turnId: string;
@@ -24,6 +29,7 @@ export interface ProviderTextDeltaCoalescer {
     readonly emitEmpty?: boolean;
   }) => Effect.Effect<string>;
   readonly flushTurn: (turnId: string) => Effect.Effect<void>;
+  readonly flushAndJoin: Effect.Effect<void>;
 }
 
 interface BufferedProviderText {
@@ -41,11 +47,18 @@ export const makeProviderTextDeltaCoalescer = Effect.fn("makeProviderTextDeltaCo
   function* (input: {
     readonly flushIntervalMs: number;
     readonly emit: (update: ProviderTextDeltaUpdate) => Effect.Effect<void>;
+    readonly forkFlush?: (
+      work: Effect.Effect<void>,
+    ) => Effect.Effect<Fiber.Fiber<void, OwnedEventDrainUnknown>, never, Scope.Scope>;
   }): Effect.fn.Return<ProviderTextDeltaCoalescer, never, Scope.Scope> {
     const buffered = yield* Ref.make(new Map<string, BufferedProviderText>());
     const flushScheduled = yield* Ref.make(false);
     const flushLock = yield* Semaphore.make(1);
     const coalescerScope = yield* Effect.scope;
+    const flushes = new Set<Fiber.Fiber<void, OwnedEventDrainUnknown>>();
+    const wakeups = new Set<Deferred.Deferred<void>>();
+    let finishing = false;
+    let flushFailure: Cause.Cause<OwnedEventDrainUnknown> | undefined;
 
     const drain = (options: {
       readonly predicate: (message: BufferedProviderText) => boolean;
@@ -104,6 +117,7 @@ export const makeProviderTextDeltaCoalescer = Effect.fn("makeProviderTextDeltaCo
               Effect.gen(function* () {
                 const shouldSchedule = yield* flushLock.withPermit(
                   Effect.gen(function* () {
+                    if (finishing) return yield* Effect.die(new Error("Coalescer input is closed"));
                     yield* Ref.update(buffered, (current) => {
                       const key = providerTextBufferKey(turnId, itemId);
                       const existing = current.get(key);
@@ -120,17 +134,40 @@ export const makeProviderTextDeltaCoalescer = Effect.fn("makeProviderTextDeltaCo
                   }),
                 );
                 if (shouldSchedule) {
-                  yield* Effect.sleep(Duration.millis(Math.max(1, input.flushIntervalMs))).pipe(
-                    Effect.andThen(flushDirty),
-                    Effect.interruptible,
-                    Effect.forkIn(coalescerScope),
+                  const wake = yield* Deferred.make<void>();
+                  wakeups.add(wake);
+                  const work = Effect.raceFirst(
+                    Effect.sleep(Duration.millis(Math.max(1, input.flushIntervalMs))),
+                    Deferred.await(wake),
+                  ).pipe(Effect.andThen(flushDirty), Effect.interruptible);
+                  const fiber = yield* (
+                    input.forkFlush
+                      ? input.forkFlush(work)
+                      : work.pipe(Effect.forkIn(coalescerScope))
+                  ).pipe(
+                    Effect.provideService(Scope.Scope, coalescerScope),
+                    Effect.onExit((exit) =>
+                      Effect.sync(() => {
+                        if (Exit.isFailure(exit)) {
+                          flushFailure ??= exit.cause;
+                          wakeups.delete(wake);
+                        }
+                      }),
+                    ),
                   );
+                  flushes.add(fiber);
+                  fiber.addObserver((exit) => {
+                    flushes.delete(fiber);
+                    wakeups.delete(wake);
+                    if (Exit.isFailure(exit)) flushFailure ??= exit.cause;
+                  });
                 }
               }),
             ),
       complete: ({ turnId, itemId, finalText, emitEmpty = true }) =>
         flushLock.withPermit(
           Effect.gen(function* () {
+            if (finishing) return yield* Effect.die(new Error("Coalescer input is closed"));
             const key = providerTextBufferKey(turnId, itemId);
             const existing = (yield* Ref.get(buffered)).get(key);
             const text = finalText !== undefined ? finalText : (existing?.text ?? "");
@@ -151,6 +188,19 @@ export const makeProviderTextDeltaCoalescer = Effect.fn("makeProviderTextDeltaCo
           completed: true,
           onlyDirty: false,
         }),
+      flushAndJoin: Effect.gen(function* () {
+        yield* flushLock.withPermit(
+          Effect.sync(() => {
+            finishing = true;
+            for (const wake of wakeups) Deferred.doneUnsafe(wake, Effect.void);
+          }),
+        );
+        yield* Effect.forEach([...flushes], (fiber) => Fiber.join(fiber).pipe(Effect.orDie), {
+          discard: true,
+        });
+        if (flushFailure) return yield* Effect.die(flushFailure);
+        yield* drain({ predicate: () => true, completed: true, onlyDirty: false });
+      }),
     };
   },
 );

@@ -9,6 +9,7 @@ import { buildServerProvider } from "@t3tools/provider-core/server/snapshotProbe
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import { ProviderInstanceRegistry } from "../provider/ProviderInstanceRegistry.ts";
 import { inheritedNativeBridge, type NativeBridge } from "./bridge.ts";
+import { armNativeExecution } from "./executionLive.ts";
 import { makeNativeAdapter } from "./adapter.ts";
 import { NATIVE_LABEL, NATIVE_MODEL } from "./profile.ts";
 
@@ -119,8 +120,13 @@ export const makeNativeRegistry = Effect.fn("makeNativeRegistry")(function* (bri
 export const layer = Layer.effect(
   ProviderInstanceRegistry,
   Effect.gen(function* () {
-    const bridge = yield* Effect.acquireRelease(Effect.sync(inheritedNativeBridge), (client) =>
-      Effect.sync(() => client.close()),
+    const bridge = yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        const client = inheritedNativeBridge();
+        armNativeExecution(client);
+        return client;
+      }),
+      (client) => Effect.sync(() => client.close()),
     );
     return yield* makeNativeRegistry(bridge);
   }),

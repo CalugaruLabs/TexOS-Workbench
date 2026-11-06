@@ -16,6 +16,7 @@ import {
   EXECUTION_FRAME_BYTES,
   decodeExecutionHostRequest,
   type ExecutionChannelBinding,
+  type ExecutionObservationKey,
 } from "./executionProtocol.ts";
 import {
   decodePersonalAgentCommand,
@@ -73,9 +74,15 @@ export const MAX_FRAME = 65536;
 export const MAX_NATIVE_FRAME = 1024 * 1024;
 
 /** A single host generation. EOF is permanent; it never reconnects or resends. */
+/** Builds the endpoint once TexOS's first hello names the binding; `readBinding` asks TexOS back. */
+export type ExecutionEndpointFactory = (
+  binding: ExecutionChannelBinding,
+  readBinding: (key: ExecutionObservationKey, signal: AbortSignal) => Promise<unknown>,
+) => PrivateExecutionEndpoint;
+
 export class NativeBridge {
   private executionChannel: PrivateExecutionChannel | undefined;
-  private executionEndpointFactory: (() => PrivateExecutionEndpoint) | undefined;
+  private executionEndpointFactory: ExecutionEndpointFactory | undefined;
   private agentPending = new Map<
     string,
     {
@@ -165,7 +172,7 @@ export class NativeBridge {
    * Arms execution control for the first `execution.hello` on this private pipe, which then
    * supplies the binding. Only TexOS can write to the pipe, so the binding stays native-owned.
    */
-  enableExecutionControl(factory: () => PrivateExecutionEndpoint) {
+  enableExecutionControl(factory: ExecutionEndpointFactory) {
     if (this.failure || this.executionChannel || this.executionEndpointFactory)
       throw new Error("Execution control cannot be rebound.");
     this.executionEndpointFactory = factory;
@@ -325,13 +332,18 @@ export class NativeBridge {
             if (request.method === "execution.hello") {
               const factory = this.executionEndpointFactory;
               this.executionEndpointFactory = undefined;
+              const binding = {
+                authorityID: request.authorityID,
+                hostID: request.hostID,
+                hostGeneration: request.hostGeneration,
+              };
               this.installExecutionControl(
-                {
-                  authorityID: request.authorityID,
-                  hostID: request.hostID,
-                  hostGeneration: request.hostGeneration,
-                },
-                factory(),
+                binding,
+                factory(binding, (key, signal) => {
+                  if (!this.executionChannel)
+                    return Promise.reject(new Error("Execution control unavailable."));
+                  return this.executionChannel.readBinding(key, signal);
+                }),
               );
             }
           }

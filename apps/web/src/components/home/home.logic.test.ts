@@ -45,6 +45,22 @@ describe("groupHomeThreads", () => {
         .map((entry) => entry.title),
     );
   });
+
+  it("leaves subagent threads to their parent, as the sidebar does", () => {
+    const parent = thread("parent", "project-a", { hasPendingApprovals: true });
+    const subagent = thread("subagent", "project-a", {
+      hasPendingApprovals: true,
+      lineage: {
+        rootThreadId: parent.id,
+        parentThreadId: parent.id,
+        relationshipToParent: "subagent",
+      },
+    });
+
+    const sections = groupHomeThreads([parent, subagent]);
+
+    expect(sections.needsYou.map((entry) => entry.thread.title)).toEqual(["parent"]);
+  });
 });
 
 describe("homeGreeting", () => {

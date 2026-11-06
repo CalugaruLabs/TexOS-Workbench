@@ -1,4 +1,4 @@
-import { resolveThreadStatusPill } from "../Sidebar.logic";
+import { isSidebarSubagentThread, resolveThreadStatusPill } from "../Sidebar.logic";
 import type { SidebarThreadSummary } from "../../types";
 import {
   SECTION_BY_PILL,
@@ -20,7 +20,10 @@ export function groupHomeThreads<T extends SidebarThreadSummary>(
   const running: Array<ProjectOverviewThread<T>> = [];
   const recent: Array<ProjectOverviewThread<T>> = [];
   const live = threads
-    .filter((thread) => thread.archivedAt === null && thread.deletedAt === null)
+    .filter(
+      (thread) =>
+        thread.archivedAt === null && thread.deletedAt === null && !isSidebarSubagentThread(thread),
+    )
     .toSorted((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
   for (const thread of live) {
     const pill = resolveThreadStatusPill({ thread });

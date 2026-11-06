@@ -40,12 +40,15 @@ export function HomePage({
   const sections = groupHomeThreads(threads);
   const [now] = useState(() => new Date());
 
-  const projectNameOf = (thread: SidebarThreadSummary) =>
-    projects.find((project) =>
-      project.memberProjectRefs.some(
-        (ref) => ref.environmentId === thread.environmentId && ref.projectId === thread.projectId,
+  const projectNames = new Map(
+    projects.flatMap((project) =>
+      project.memberProjectRefs.map(
+        (ref) => [`${ref.environmentId}:${ref.projectId}`, project.displayName] as const,
       ),
-    )?.displayName;
+    ),
+  );
+  const projectNameOf = (thread: SidebarThreadSummary) =>
+    projectNames.get(`${thread.environmentId}:${thread.projectId}`);
 
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
@@ -107,8 +110,9 @@ function HomeComposer({ projects }: { readonly projects: ReadonlyArray<SidebarPr
   const start = async () => {
     if (project === undefined || starting) return;
     setStarting(true);
-    const opened = await handleNewThread(scopeProjectRef(project.environmentId, project.id));
-    setStarting(false);
+    const opened = await handleNewThread(scopeProjectRef(project.environmentId, project.id))
+      .catch(() => null)
+      .finally(() => setStarting(false));
     if (opened !== null && prompt.trim().length > 0) {
       useComposerDraftStore.getState().setPrompt(opened.draftId, prompt.trim());
     }

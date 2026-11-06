@@ -142,7 +142,6 @@ function RootRouteBranch() {
   const pathname = useLocation({ select: (location) => location.pathname });
   const { authGateState } = Route.useRouteContext();
   const primaryEnvironmentAuthenticated = authGateState.status === "authenticated";
-  // Once true, stays true: a visit to /welcome means the bootstrap already chose a route.
   const hostedPromptLinkLanding = useHostedPromptLinkLanding(
     authGateState.status === "hosted-static",
   );
@@ -312,27 +311,21 @@ function EventRouter() {
   const serverWelcome = useAtomValue(primaryServerWelcomeAtom);
 
   const handleWelcome = useEffectEvent((payload: ServerLifecycleWelcomePayload | null) => {
-    if (!payload) return;
-
-    void (async () => {
-      if (!payload.bootstrapProjectId || !payload.bootstrapThreadId) {
-        return;
-      }
-      const bootstrapProject = readProject(
+    if (!payload?.bootstrapProjectId) return;
+    const bootstrapProject = readProject(
+      scopeProjectRef(payload.environment.environmentId, payload.bootstrapProjectId),
+    );
+    const bootstrapProjectKey =
+      (bootstrapProject
+        ? deriveLogicalProjectKeyFromSettings(bootstrapProject, projectGroupingSettings)
+        : null) ??
+      (serverConfig?.cwd
+        ? derivePhysicalProjectKeyFromPath(payload.environment.environmentId, serverConfig.cwd)
+        : null) ??
+      scopedProjectKey(
         scopeProjectRef(payload.environment.environmentId, payload.bootstrapProjectId),
       );
-      const bootstrapProjectKey =
-        (bootstrapProject
-          ? deriveLogicalProjectKeyFromSettings(bootstrapProject, projectGroupingSettings)
-          : null) ??
-        (serverConfig?.cwd
-          ? derivePhysicalProjectKeyFromPath(payload.environment.environmentId, serverConfig.cwd)
-          : null) ??
-        scopedProjectKey(
-          scopeProjectRef(payload.environment.environmentId, payload.bootstrapProjectId),
-        );
-      useUiStateStore.getState().setProjectExpanded(bootstrapProjectKey, true);
-    })().catch(() => undefined);
+    useUiStateStore.getState().setProjectExpanded(bootstrapProjectKey, true);
   });
 
   useEffect(() => {

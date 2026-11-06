@@ -109,6 +109,14 @@ export interface ExecutionAuthorizationRequest extends Frame {
   };
 }
 
+export interface ExecutionBindingRequest extends Frame {
+  readonly kind: "request";
+  readonly method: "execution.readBinding";
+  readonly params: ExecutionObservationKey;
+}
+
+export type ExecutionNativeRequest = ExecutionAuthorizationRequest | ExecutionBindingRequest;
+
 export interface NativeExecutionAuthorization {
   readonly decisionID: string;
   readonly commandID: string;

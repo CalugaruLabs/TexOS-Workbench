@@ -52,6 +52,7 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as OwnedEvents from "@t3tools/provider-core/server/OwnedAdapterEventBroker";
 
 const layerTestDatabase = SqlitePersistence.layerMemory;
 const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
@@ -319,6 +320,9 @@ function unimplemented(detail: string) {
 const makeProviderAdapter = Effect.fnUntraced(function* (
   state: Ref.Ref<TestProviderRuntimeState>,
   options: {
+    readonly ownedEventConsumer?: NonNullable<
+      ProviderAdapter.ProviderAdapterV2SessionRuntime["ownedEventConsumer"]
+    >;
     readonly failEventStream?: boolean;
     readonly capabilities?: OrchestrationV2ProviderCapabilities;
     readonly mcpConfigs?: Ref.Ref<
@@ -397,6 +401,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
 
         return {
           instanceId: ProviderInstanceId.make("codex"),
+          ...(options.ownedEventConsumer ? { ownedEventConsumer: options.ownedEventConsumer } : {}),
           driver: CODEX_DRIVER,
           providerSessionId: input.providerSessionId,
           providerSession: session,
@@ -455,6 +460,9 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
 });
 
 function layerTest(input: {
+  readonly ownedEventConsumer?: NonNullable<
+    ProviderAdapter.ProviderAdapterV2SessionRuntime["ownedEventConsumer"]
+  >;
   readonly state: Ref.Ref<TestProviderRuntimeState>;
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
@@ -498,6 +506,7 @@ function layerTest(input: {
             : layerTestEventSink;
   const layerRegistry = Layer.unwrap(
     makeProviderAdapter(input.state, {
+      ...(input.ownedEventConsumer ? { ownedEventConsumer: input.ownedEventConsumer } : {}),
       failEventStream: input.failEventStream ?? false,
       ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
       ...(input.mcpConfigs === undefined ? {} : { mcpConfigs: input.mcpConfigs }),
@@ -819,6 +828,55 @@ function makePendingRuntimeRequestEvents(input: {
     return { events, providerEvents, requestId, nodeId };
   });
 }
+
+it.effect(
+  "ProviderSessionManagerV2 masks the direct owned consumer until primary ACK integration",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const broker = yield* OwnedEvents.make<ProviderAdapter.ProviderAdapterV2Event>();
+      const directConsumer = yield* broker.designateConsumer;
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-owned-consumer-mask");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const created = yield* makeThreadCreatedEvent({ threadId, now, idAllocator });
+        yield* eventSink.write({ events: [created] });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.equal(runtime.ownedEventConsumer, undefined);
+        assert.isFalse(Object.hasOwn(runtime, "ownedEventConsumer"));
+        const subscribe = runtime.subscribeEvents;
+        assert.ok(subscribe);
+        const subscription = yield* subscribe;
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.ok(queue);
+        yield* Queue.offer(queue, {
+          type: "provider_session.updated",
+          driver: CODEX_DRIVER,
+          providerSession: runtime.providerSession,
+        });
+        const events = yield* subscription.events.pipe(Stream.take(1), Stream.runCollect);
+        assert.equal(events[0]?.type, "provider_session.updated");
+        assert.equal(runtime.providerSessionId, providerSessionId);
+        yield* subscription.close;
+      }).pipe(
+        Effect.provide(
+          layerTest({ state, idleTimeoutMs: 60000, ownedEventConsumer: directConsumer }),
+        ),
+      );
+    }),
+);
 
 it.effect("ProviderSessionManagerV2 opens independent sessions concurrently", () =>
   Effect.gen(function* () {

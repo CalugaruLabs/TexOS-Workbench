@@ -5,7 +5,7 @@ import {
   EXECUTION_CAPABILITY,
   executionEnvelope,
   type ExecutionWireResponse,
-  type ExecutionAuthorizationRequest,
+  type ExecutionNativeRequest,
 } from "./executionProtocol.ts";
 import {
   syntheticBinding,
@@ -16,7 +16,7 @@ import {
 
 describe("private execution direction and correlation", () => {
   it("processes a native authorization reply while the original request handler awaits it", async () => {
-    const sent: Array<ExecutionWireResponse | ExecutionAuthorizationRequest> = [];
+    const sent: Array<ExecutionWireResponse | ExecutionNativeRequest> = [];
     const intent = syntheticIntent();
     const envelopeDigest = executionEnvelope(intent).digest;
     let settle: (() => void) | undefined;

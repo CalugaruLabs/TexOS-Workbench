@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import canonicalSnapshot from "../../../../../packages/contracts/test-fixtures/personal-agent-canonical-tasks.json" with { type: "json" };
 import {
   PersonalAgentClient,
   verifyPersonalArtifact,
@@ -29,6 +30,9 @@ function fixture(negotiatedHello: unknown = hello) {
   let current: unknown = snapshot();
   let refusal: Error | null = null;
   let readResult: unknown;
+  let holdSnapshots = false;
+  let snapshotRefusal: Error | null = null;
+  const pendingSnapshots: Array<{ resolve: (value: unknown) => void; captured: unknown }> = [];
   const source: ReturnType<PersonalAgentTransport["events"]> = {
     onopen: null,
     onmessage: null,
@@ -42,6 +46,11 @@ function fixture(negotiatedHello: unknown = hello) {
       commands.push({ method, params, id });
       if (refusal && method === "agents.submit") throw refusal;
       if (method === "agents.history" || method === "agents.run") return readResult;
+      if (method === "agents.snapshot" && snapshotRefusal) throw snapshotRefusal;
+      if (method === "agents.snapshot" && holdSnapshots)
+        return new Promise((resolve) =>
+          pendingSnapshots.push({ resolve, captured: structuredClone(current) }),
+        );
       return method === "agents.hello"
         ? negotiatedHello
         : method === "agents.snapshot"
@@ -62,6 +71,20 @@ function fixture(negotiatedHello: unknown = hello) {
     setReadResult(value: unknown) {
       readResult = value;
     },
+    holdSnapshots(value = true) {
+      holdSnapshots = value;
+    },
+    refuseSnapshots(value: Error | null) {
+      snapshotRefusal = value;
+    },
+    pendingSnapshotCount() {
+      return pendingSnapshots.length;
+    },
+    resolveSnapshot(index: number) {
+      const request = pendingSnapshots[index];
+      if (!request) throw new Error("Missing synthetic read");
+      request.resolve(request.captured);
+    },
     emit(value: unknown) {
       (source.onmessage as ((event: MessageEvent) => void) | null)?.(
         new MessageEvent("message", { data: JSON.stringify(value) }),
@@ -73,6 +96,199 @@ function fixture(negotiatedHello: unknown = hello) {
   };
 }
 describe("personal agent presentation client", () => {
+  it("does not let a read started before an uncertain command clear recovery", async () => {
+    const f = fixture();
+    f.setSnapshot(structuredClone(canonicalSnapshot));
+    await f.client.connect();
+    f.holdSnapshots();
+    const earlierRead = f.client.refresh();
+    f.refuse(new Error("Synthetic command outcome uncertain"));
+    await expect(
+      f.client.command("agents.submit", { agentID: "builder", text: "Synthetic work" }),
+    ).rejects.toThrow("Synthetic command outcome uncertain");
+    f.resolveSnapshot(0);
+    await earlierRead;
+    expect(f.client.getSnapshot().connected).toBe(false);
+    expect(f.client.getSnapshot().problem).toBe("Synthetic command outcome uncertain");
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks).toBeUndefined();
+    f.emit(structuredClone(canonicalSnapshot));
+    expect(f.client.getSnapshot().connected).toBe(false);
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks).toBeUndefined();
+    f.holdSnapshots(false);
+    const fresh = structuredClone(canonicalSnapshot);
+    fresh.canonicalTasks.revision = 2;
+    fresh.canonicalTasks.items[0]!.title = "Confirmed after recovery";
+    f.setSnapshot(fresh);
+    await f.client.refresh();
+    expect(f.client.getSnapshot().connected).toBe(true);
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks?.items[0]?.title).toBe(
+      "Confirmed after recovery",
+    );
+    expect(f.commands.filter((command) => command.method === "agents.submit")).toHaveLength(1);
+    f.client.disconnect();
+  });
+  it.each([false, true])(
+    "does not let an in-flight read clear a newer source fence (redacted events: %s)",
+    async (redacted) => {
+      const f = fixture();
+      f.setSnapshot(structuredClone(canonicalSnapshot));
+      await f.client.connect();
+      f.holdSnapshots();
+      const second = structuredClone(canonicalSnapshot);
+      second.canonicalTasks.projectionGeneration = "projection-B";
+      second.canonicalTasks.items[0]!.title = "Intermediate source";
+      const third = structuredClone(canonicalSnapshot);
+      third.canonicalTasks.projectionGeneration = "projection-C";
+      third.canonicalTasks.items[0]!.title = "Latest source";
+      const { canonicalTasks: _omitted, ...withoutTasks } = canonicalSnapshot;
+      f.setSnapshot(second);
+      f.emit(redacted ? withoutTasks : second);
+      f.setSnapshot(third);
+      f.emit(redacted ? withoutTasks : third);
+      f.resolveSnapshot(0);
+      await expect.poll(() => f.pendingSnapshotCount()).toBe(2);
+      expect(f.client.getSnapshot().snapshot?.canonicalTasks).toBeUndefined();
+      f.resolveSnapshot(1);
+      await expect
+        .poll(() => f.client.getSnapshot().snapshot?.canonicalTasks?.items[0]?.title)
+        .toBe("Latest source");
+      expect(f.commands.filter((command) => command.method === "agents.snapshot")).toHaveLength(3);
+      expect(f.commands.some((command) => command.method === "agents.submit")).toBe(false);
+      f.client.disconnect();
+    },
+  );
+  it("keeps refresh recovery latched until a successful read instead of restoring details from queued events", async () => {
+    const f = fixture();
+    f.setSnapshot(structuredClone(canonicalSnapshot));
+    await f.client.connect();
+    f.refuseSnapshots(new Error("Synthetic read failure"));
+    await f.client.refresh();
+    expect(f.client.getSnapshot().connected).toBe(false);
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks).toBeUndefined();
+    const next = structuredClone(canonicalSnapshot);
+    next.canonicalTasks.revision = 2;
+    next.canonicalTasks.items[0]!.title = "After recovery";
+    f.emit(next);
+    expect(f.client.getSnapshot().connected).toBe(false);
+    expect(f.client.getSnapshot().problem).toBe("Synthetic read failure");
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks).toBeUndefined();
+    f.refuseSnapshots(null);
+    f.setSnapshot(next);
+    await f.client.refresh();
+    expect(f.client.getSnapshot().connected).toBe(true);
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks?.items[0]?.title).toBe("After recovery");
+    expect(f.commands.some((command) => command.method === "agents.submit")).toBe(false);
+    f.client.disconnect();
+  });
+  it("updates native task content with unchanged helper revision and never regresses it", async () => {
+    const f = fixture();
+    f.setSnapshot(structuredClone(canonicalSnapshot));
+    await f.client.connect();
+    const next = structuredClone(canonicalSnapshot);
+    next.canonicalTasks.revision = 2;
+    next.canonicalTasks.items[0]!.title = "New native title";
+    f.emit(next);
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks?.items[0]?.title).toBe(
+      "New native title",
+    );
+    expect(f.client.getSnapshot().snapshot?.revision).toBe(1);
+    f.emit(canonicalSnapshot);
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks).toBeUndefined();
+    expect(f.commands.some((command) => command.method === "agents.submit")).toBe(false);
+    f.client.disconnect();
+  });
+  it("orders overlapping snapshot reads without republishing a superseded title", async () => {
+    const f = fixture();
+    f.setSnapshot(structuredClone(canonicalSnapshot));
+    await f.client.connect();
+    f.holdSnapshots();
+    const older = f.client.refresh();
+    const next = structuredClone(canonicalSnapshot);
+    next.canonicalTasks.revision = 2;
+    next.canonicalTasks.items[0]!.title = "Current native title";
+    f.setSnapshot(next);
+    const newer = f.client.refresh();
+    f.resolveSnapshot(1);
+    await newer;
+    f.resolveSnapshot(0);
+    await older;
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks?.items[0]?.title).toBe(
+      "Current native title",
+    );
+    expect(
+      f.commands.every((command) => ["agents.hello", "agents.snapshot"].includes(command.method)),
+    ).toBe(true);
+    f.client.disconnect();
+  });
+  it("withholds an unknown generation and fences its old events until a fresh read", async () => {
+    const f = fixture();
+    f.setSnapshot(structuredClone(canonicalSnapshot));
+    await f.client.connect();
+    const next = structuredClone(canonicalSnapshot);
+    next.canonicalTasks.projectionGeneration = "projection-B";
+    next.canonicalTasks.items[0]!.title = "Replacement source";
+    f.setSnapshot(next);
+    f.holdSnapshots();
+    f.emit(next);
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks).toBeUndefined();
+    f.emit(canonicalSnapshot);
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks).toBeUndefined();
+    f.resolveSnapshot(0);
+    await expect
+      .poll(() => f.client.getSnapshot().snapshot?.canonicalTasks?.items[0]?.title)
+      .toBe("Replacement source");
+    expect(f.commands.filter((command) => command.method === "agents.snapshot")).toHaveLength(2);
+    f.client.disconnect();
+  });
+  it("retires callbacks and reads when a connection reuses its helper and EventSource identities", async () => {
+    const f = fixture();
+    f.setSnapshot(structuredClone(canonicalSnapshot));
+    await f.client.connect();
+    const oldMessage = f.source.onmessage;
+    const oldError = f.source.onerror;
+    const oldOpen = f.source.onopen;
+    f.holdSnapshots();
+    const oldRead = f.client.refresh();
+    (oldError as (() => void) | null)?.();
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks).toBeUndefined();
+    const next = structuredClone(canonicalSnapshot);
+    next.canonicalTasks.projectionGeneration = "reconnected-source";
+    next.canonicalTasks.items[0]!.title = "Fresh connection";
+    f.setSnapshot(next);
+    f.holdSnapshots(false);
+    await f.client.refresh();
+    f.resolveSnapshot(0);
+    await oldRead;
+    (oldMessage as ((event: MessageEvent) => void) | null)?.(
+      new MessageEvent("message", { data: JSON.stringify(canonicalSnapshot) }),
+    );
+    (oldError as (() => void) | null)?.();
+    (oldOpen as (() => void) | null)?.();
+    expect(f.client.getSnapshot().connected).toBe(true);
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks?.items[0]?.title).toBe(
+      "Fresh connection",
+    );
+    expect(f.commands.some((command) => command.method === "agents.submit")).toBe(false);
+    f.client.disconnect();
+  });
+  it("clears optional native presentation and does not return raw stale command snapshots", async () => {
+    const f = fixture();
+    const next = structuredClone(canonicalSnapshot);
+    next.canonicalTasks.revision = 2;
+    f.setSnapshot(next);
+    await f.client.connect();
+    f.setSnapshot(canonicalSnapshot);
+    const result = await f.client.command("agents.update", { agentID: "builder", name: "Changed" });
+    expect(result).toMatchObject({ snapshot: { runtimeID: "r" } });
+    expect(
+      (result as { snapshot: { canonicalTasks?: unknown } }).snapshot.canonicalTasks,
+    ).toBeUndefined();
+    f.setSnapshot(snapshot());
+    await f.client.refresh();
+    expect(f.client.getSnapshot().snapshot?.canonicalTasks).toBeUndefined();
+    expect(f.client.getSnapshot().snapshot?.runs).toEqual([]);
+    f.client.disconnect();
+  });
   it("keeps observation reads and metadata available while refusing every execution control locally", async () => {
     const f = fixture({ ...hello, mode: "observeOnly", executionAvailable: false });
     f.setSnapshot({ ...snapshot(), mode: "observeOnly", executionAvailable: false });

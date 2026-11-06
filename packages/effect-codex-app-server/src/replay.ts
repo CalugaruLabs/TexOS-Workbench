@@ -1,4 +1,5 @@
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -8,6 +9,7 @@ import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as CodexClient from "./client.ts";
 import * as CodexError from "./errors.ts";
@@ -393,11 +395,8 @@ const makeReplayClient = Effect.fn("effect-codex-app-server/replay.makeReplayCli
   return yield* makeReplayClientWithState(driver, options);
 });
 
-const makeReplayClientWithState = Effect.fn(
-  "effect-codex-app-server/replay.makeReplayClientWithState",
-)(function* (
+const makeReplayIo = Effect.fn("effect-codex-app-server/replay.makeReplayIo")(function* (
   driver: CodexAppServerReplayDriver,
-  options: CodexClient.CodexAppServerClientOptions = {},
 ) {
   const transcript = driver.transcript;
   const ignoredThreadConfigKeys = recorderThreadConfigKeys(transcript);
@@ -549,14 +548,54 @@ const makeReplayClientWithState = Effect.fn(
     ),
   );
 
-  const stdio = Stdio.make({
-    args: Effect.succeed([]),
-    stdin: Stream.fromQueue(input),
-    stdout: () => Sink.forEach(processOutboundChunk),
-    stderr: () => Sink.drain,
-  });
-
   yield* drainInbound();
 
-  return yield* CodexClient.make(stdio, options, terminationError);
+  return { input, processOutboundChunk, terminationError };
+});
+
+const makeReplayClientWithState = Effect.fn(
+  "effect-codex-app-server/replay.makeReplayClientWithState",
+)(function* (
+  driver: CodexAppServerReplayDriver,
+  options: CodexClient.CodexAppServerClientOptions = {},
+) {
+  const io = yield* makeReplayIo(driver);
+  const stdio = Stdio.make({
+    args: Effect.succeed([]),
+    stdin: Stream.fromQueue(io.input),
+    stdout: () => Sink.forEach(io.processOutboundChunk),
+    stderr: () => Sink.drain,
+  });
+  return yield* CodexClient.make(stdio, options, io.terminationError);
+});
+
+/**
+ * The replay as a child process, so the owned client can observe input EOF, exit and stderr.
+ * Closing stdin ends the replay's output and exits with 0, like a CLI reaching EOF.
+ */
+export const makeReplayChildProcess = Effect.fn(
+  "effect-codex-app-server/replay.makeReplayChildProcess",
+)(function* (driver: CodexAppServerReplayDriver) {
+  const io = yield* makeReplayIo(driver);
+  const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+  const exit = Queue.end(io.input).pipe(
+    Effect.andThen(Deferred.succeed(exited, ChildProcessSpawner.ExitCode(0))),
+    Effect.asVoid,
+  );
+  const handle: ChildProcessSpawner.ChildProcessHandle = {
+    "~effect/process/ChildProcessSpawner/ChildProcessHandle":
+      "~effect/process/ChildProcessSpawner/ChildProcessHandle",
+    pid: ChildProcessSpawner.ProcessId(0),
+    exitCode: Deferred.await(exited),
+    isRunning: Deferred.isDone(exited).pipe(Effect.map((done) => !done)),
+    kill: () => exit,
+    stdin: Sink.forEach(io.processOutboundChunk).pipe(Sink.ensuring(exit)),
+    stdout: Stream.fromQueue(io.input),
+    stderr: Stream.empty,
+    all: Stream.die("Replay child has no combined output"),
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+    unref: Effect.succeed(Effect.void),
+  };
+  return handle;
 });

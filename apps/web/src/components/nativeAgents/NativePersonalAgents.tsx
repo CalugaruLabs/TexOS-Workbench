@@ -3,6 +3,9 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   activePersonalAgentRun,
   personalAgentExecutionAvailable,
+  personalAgentCanonicalTaskStatus,
+  personalAgentAttemptPhaseLabel,
+  personalAgentPlainLabel,
 } from "@t3tools/shared/personalAgents";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -54,6 +57,8 @@ export function NativePersonalAgents({
   const runIDs = new Set(runs.map((run) => run.id));
   const attention = snapshot?.attention.filter((item) => runIDs.has(item.runID)) ?? [];
   const artifacts = snapshot?.artifacts.filter((item) => runIDs.has(item.runID)) ?? [];
+  const tasks =
+    snapshot?.canonicalTasks?.items.filter((task) => task.agentID === selected?.id) ?? [];
   const edit = (agent: PersonalAgent) =>
     setDraft({
       agentID: agent.id,
@@ -134,10 +139,10 @@ export function NativePersonalAgents({
                       setPreviewProblem(null);
                     }}
                   >
-                    {agent.name}
+                    {personalAgentPlainLabel(agent.name)}
                   </Button>
                   <p className="px-2 text-xs text-muted-foreground">
-                    {providerName(agent.provider)}
+                    Default tool: {providerName(agent.provider)}
                   </p>
                 </div>
               ))}
@@ -222,7 +227,7 @@ export function NativePersonalAgents({
               ) : selected ? (
                 <>
                   <div className="flex items-center justify-between gap-3">
-                    <h3 className="font-medium">{selected.name}</h3>
+                    <h3 className="font-medium">{personalAgentPlainLabel(selected.name)}</h3>
                     <Button
                       size="sm"
                       variant="ghost"
@@ -235,7 +240,7 @@ export function NativePersonalAgents({
                   <div
                     className="max-h-72 space-y-3 overflow-auto"
                     role="log"
-                    aria-label={`${selected.name} conversation`}
+                    aria-label={`${personalAgentPlainLabel(selected.name)} conversation`}
                   >
                     {snapshot?.messages
                       .filter((message) => message.conversationID === selected.conversationID)
@@ -243,7 +248,7 @@ export function NativePersonalAgents({
                         <div key={message.id} className="space-y-1">
                           <p className="text-xs text-muted-foreground">
                             {message.role === "assistant"
-                              ? selected.name
+                              ? personalAgentPlainLabel(selected.name)
                               : message.role === "user"
                                 ? "You"
                                 : "TexOS"}
@@ -252,6 +257,112 @@ export function NativePersonalAgents({
                         </div>
                       ))}
                   </div>
+                  {snapshot?.canonicalTasks ? (
+                    <section aria-label="Shared tasks" className="space-y-3">
+                      <h4 className="font-medium">Tasks</h4>
+                      {snapshot.canonicalTasks.state === "unavailable" ? (
+                        <p className="text-sm text-muted-foreground">
+                          Shared tasks are unavailable. Refresh state to check again.
+                        </p>
+                      ) : tasks.length === 0 ? (
+                        <p className="text-sm text-muted-foreground">
+                          No shared tasks for this agent yet.
+                        </p>
+                      ) : (
+                        tasks.map((task) => (
+                          <article
+                            key={task.nativeTaskID}
+                            className="space-y-2 rounded-lg border p-3"
+                          >
+                            <h5 className="font-medium">{task.title}</h5>
+                            <p className="text-sm text-muted-foreground">
+                              {personalAgentCanonicalTaskStatus(task.displayStatus)}
+                            </p>
+                            {task.runs.map((run) => (
+                              <div key={run.nativeRunID} className="space-y-1 text-sm">
+                                <p>
+                                  {providerName(run.providerID)} ·{" "}
+                                  {run.attemptObservation
+                                    ? personalAgentAttemptPhaseLabel(run.attemptObservation.phase)
+                                    : "Attempt recorded"}
+                                </p>
+                                <p className="text-muted-foreground">
+                                  {run.resultReview === "reviewed"
+                                    ? "Reviewed result"
+                                    : "Result needs checking"}
+                                </p>
+                                <details className="text-xs text-muted-foreground">
+                                  <summary className="cursor-pointer">Details</summary>
+                                  <dl className="space-y-1 break-all py-2">
+                                    <dt>Task reference</dt>
+                                    <dd>{task.nativeTaskID}</dd>
+                                    <dt>Run reference</dt>
+                                    <dd>{run.nativeRunID}</dd>
+                                    <dt>Command reference</dt>
+                                    <dd>{run.nativeCommandID}</dd>
+                                    {run.nativeParentRunID ? (
+                                      <>
+                                        <dt>
+                                          Parent run
+                                          {run.parentVisibility === "outsideWindow"
+                                            ? " (outside recent history)"
+                                            : ""}
+                                        </dt>
+                                        <dd>{run.nativeParentRunID}</dd>
+                                      </>
+                                    ) : null}
+                                    {run.executionBinding ? (
+                                      <>
+                                        <dt>
+                                          {run.executionBinding.channelPresence === "current"
+                                            ? "Execution channel at last refresh"
+                                            : "Last recorded execution channel"}
+                                        </dt>
+                                        <dd>{run.executionBinding.runtimeID}</dd>
+                                        <dt>Execution run</dt>
+                                        <dd>{run.executionBinding.runtimeRunID}</dd>
+                                        {run.executionBinding.providerSessionID ? (
+                                          <>
+                                            <dt>Provider session</dt>
+                                            <dd>{run.executionBinding.providerSessionID}</dd>
+                                          </>
+                                        ) : null}
+                                      </>
+                                    ) : null}
+                                    {run.providerAttempt ? (
+                                      <>
+                                        <dt>Provider thread</dt>
+                                        <dd>{run.providerAttempt.threadID}</dd>
+                                        <dt>Provider attempt session</dt>
+                                        <dd>{run.providerAttempt.sessionID}</dd>
+                                        {run.providerAttempt.turnID ? (
+                                          <>
+                                            <dt>Provider turn</dt>
+                                            <dd>{run.providerAttempt.turnID}</dd>
+                                          </>
+                                        ) : null}
+                                      </>
+                                    ) : null}
+                                    {run.reportedChildRunID ? (
+                                      <>
+                                        <dt>Reported child reference</dt>
+                                        <dd>{run.reportedChildRunID}</dd>
+                                      </>
+                                    ) : null}
+                                  </dl>
+                                </details>
+                              </div>
+                            ))}
+                          </article>
+                        ))
+                      )}
+                      {snapshot.canonicalTasks.history.hasMore ? (
+                        <p className="text-xs text-muted-foreground">
+                          Showing recent shared tasks and attempts.
+                        </p>
+                      ) : null}
+                    </section>
+                  ) : null}
                   <div className="space-y-2" aria-label="Agent work">
                     {runs
                       .slice()
@@ -260,9 +371,11 @@ export function NativePersonalAgents({
                       .map((run) => (
                         <div key={run.id} className="flex flex-wrap items-center gap-2 text-sm">
                           <span>
-                            {run.status === "needsReconciliation"
-                              ? "Outcome needs inspection"
-                              : run.status.replaceAll(/([A-Z])/g, " $1").toLowerCase()}
+                            {run.status === "completed"
+                              ? "Attempt finished"
+                              : run.status === "needsReconciliation"
+                                ? "Outcome needs inspection"
+                                : run.status.replaceAll(/([A-Z])/g, " $1").toLowerCase()}
                           </span>
                           {run.error ? <span className="text-destructive">{run.error}</span> : null}
                           {executionAvailable &&

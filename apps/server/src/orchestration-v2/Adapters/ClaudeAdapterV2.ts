@@ -52,6 +52,8 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk/sdk-tools";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- the SDK takes a Node ChildProcess for the CLI.
 import * as NodeChildProcess from "node:child_process";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- validation owns the SDK's one forwarding stream.
+import * as NodeStream from "node:stream";
 import * as NodeUtil from "node:util";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
@@ -110,6 +112,7 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Exit from "effect/Exit";
@@ -121,6 +124,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
@@ -182,6 +186,7 @@ import {
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/server/attachmentPrompt";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as OwnedEvents from "@t3tools/provider-core/server/OwnedAdapterEventBroker";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
@@ -328,6 +333,7 @@ const CLAUDE_GROUP_WATCH_SCRIPT = [
 export function spawnClaudeProcessGroup(
   options: ClaudeSpawnOptions,
   onExit?: () => void,
+  observeOwnedChild?: (child: NodeChildProcess.ChildProcess) => ClaudeSpawnedProcess,
 ): ClaudeSpawnedProcess {
   const child = NodeChildProcess.spawn(
     "/bin/sh",
@@ -347,7 +353,7 @@ export function spawnClaudeProcessGroup(
     onExit?.();
   });
   // Node's typings make stdin and stdout nullable once stdio has a fourth entry; both are pipes.
-  return child as ClaudeSpawnedProcess;
+  return observeOwnedChild ? observeOwnedChild(child) : (child as ClaudeSpawnedProcess);
 }
 
 export const ClaudeProviderCapabilitiesV2 = {
@@ -494,12 +500,14 @@ export type ClaudeAgentSdkQueryOptions = Omit<
 } & ClaudeAgentSdkThreadIdentity;
 
 export interface ClaudeAgentSdkQueryOpenInput {
+  readonly observeOwnedInput?: boolean;
   readonly options: ClaudeAgentSdkQueryOptions;
   readonly threadId: ThreadId;
   readonly providerSessionId: OrchestrationV2ProviderSession["id"];
 }
 
 export interface ClaudeAgentSdkQuerySession {
+  readonly ownedTransport?: ClaudeOwnedQueryTransport;
   readonly messages: Stream.Stream<SDKMessage, ClaudeAgentSdkQueryRunnerError>;
   readonly offer: (
     message: SDKUserMessage,
@@ -518,6 +526,34 @@ export interface ClaudeAgentSdkQuerySession {
   ) => Effect.Effect<boolean, ClaudeAgentSdkQueryRunnerError>;
   readonly interrupt: Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly close: Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
+}
+
+export interface ClaudeOwnedQueryTransport {
+  readonly transport: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<object, ClaudeAgentSdkQueryRunnerError>;
+  readonly finishInput: Effect.Effect<void>;
+  readonly promptEOF: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
+  readonly providerInput: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
+  readonly childClose: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<
+    { readonly code: number | null; readonly signal: NodeJS.Signals | null },
+    ClaudeAgentSdkQueryRunnerError
+  >;
+  readonly inputEOF: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
+  readonly parserDispatch: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
+  readonly callbacks: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
 }
 
 type ClaudeQueryStreamExit = Exit.Exit<void, ClaudeAgentSdkQueryRunnerError>;
@@ -574,6 +610,7 @@ export class ClaudeAppendSystemPromptMissingValueError extends Schema.TaggedErro
 }
 
 export interface ClaudeAgentSdkQueryRunnerShape {
+  readonly openOwned?: ClaudeAgentSdkQueryRunnerShape["open"];
   readonly allocateSessionId: Effect.Effect<string, ClaudeAgentSdkQueryRunnerError>;
   readonly open: (
     input: ClaudeAgentSdkQueryOpenInput,
@@ -637,6 +674,306 @@ function closeClaudeQuery(queryRuntime: ClaudeQuery) {
 export function claudeQueryMessages(queryRuntime: ClaudeQuery): AsyncIterable<SDKMessage, void> {
   return { [Symbol.asyncIterator]: () => queryRuntime };
 }
+
+const decodeOwnedClaudeFrame = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const ownedClaudeWireTypes = new Set([
+  "assistant",
+  "user",
+  "result",
+  "system",
+  "stream_event",
+  "tool_progress",
+  "tool_use_summary",
+  "auth_status",
+  "conversation_reset",
+  "prompt_suggestion",
+  "rate_limit_event",
+  "keep_alive",
+  "control_request",
+  "control_response",
+  "control_cancel_request",
+  "transcript_mirror",
+]);
+
+const makeOwnedClaudeObservation = (finishPrompts: Effect.Effect<void>) => {
+  const bound = Deferred.makeUnsafe<object, ClaudeAgentSdkQueryRunnerError>();
+  const promptEOF = Deferred.makeUnsafe<void, ClaudeAgentSdkQueryRunnerError>();
+  const providerInput = Deferred.makeUnsafe<void, ClaudeAgentSdkQueryRunnerError>();
+  const childClose = Deferred.makeUnsafe<
+    { code: number | null; signal: NodeJS.Signals | null },
+    ClaudeAgentSdkQueryRunnerError
+  >();
+  const inputEOF = Deferred.makeUnsafe<void, ClaudeAgentSdkQueryRunnerError>();
+  const parsed = Deferred.makeUnsafe<void, ClaudeAgentSdkQueryRunnerError>();
+  const callbacks = Deferred.makeUnsafe<void, ClaudeAgentSdkQueryRunnerError>();
+  const controls = new Set<string>();
+  let failure: ClaudeAgentSdkQueryRunnerError | undefined;
+  let child: NodeChildProcess.ChildProcess | undefined;
+  let promptFinished = false;
+  let stdoutFinished = false;
+  let sdkFinished = false;
+  let finishRequested = false;
+  let spawnRegistered = false;
+  const fail = (stage: string) => {
+    failure ??= queryRunnerError(new Error(stage), "owned-transport");
+    Deferred.doneUnsafe(parsed, Effect.fail(failure));
+    Deferred.doneUnsafe(callbacks, Effect.fail(failure));
+    return failure;
+  };
+  const settle = () => {
+    if (stdoutFinished && sdkFinished && !failure) {
+      Deferred.doneUnsafe(parsed, Effect.void);
+    }
+    if (stdoutFinished && controls.size === 0 && !failure)
+      Deferred.doneUnsafe(callbacks, Effect.void);
+  };
+  const wait = <A>(
+    deferred: Deferred.Deferred<A, ClaudeAgentSdkQueryRunnerError>,
+    timeout: Duration.Input,
+  ) =>
+    Deferred.await(deferred).pipe(
+      Effect.timeoutOrElse({
+        duration: timeout,
+        orElse: () =>
+          Effect.suspend(() => {
+            const error = fail("Owned observation deadline exceeded");
+            Deferred.doneUnsafe(deferred, Effect.fail(error));
+            return Effect.fail(error);
+          }),
+      }),
+      Effect.onInterrupt(() =>
+        Effect.sync(() => {
+          const error = fail("Owned observation interrupted");
+          Deferred.doneUnsafe(deferred, Effect.fail(error));
+        }),
+      ),
+    );
+  const validate = (incoming: boolean) => {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let remainder = "";
+    const line = (text: string) => {
+      if (!text.trim()) return;
+      const frame = decodeOwnedClaudeFrame(text);
+      if (typeof frame !== "object" || frame === null) throw Error("Invalid SDK frame");
+      const type = Reflect.get(frame, "type");
+      if (typeof type !== "string" || !ownedClaudeWireTypes.has(type))
+        throw Error("Unsupported SDK frame");
+      if (type === "system" && typeof Reflect.get(frame, "subtype") !== "string")
+        throw Error("Invalid system frame");
+      if (type === "assistant" || type === "user" || type === "result") {
+        const sessionId: unknown = Reflect.get(frame, "session_id");
+        if ((type !== "user" || sessionId !== undefined) && typeof sessionId !== "string")
+          throw Error("Missing SDK session identity");
+        if (type === "result") {
+          if (
+            typeof Reflect.get(frame, "subtype") !== "string" ||
+            typeof Reflect.get(frame, "is_error") !== "boolean"
+          )
+            throw Error("Invalid SDK result");
+        } else if (
+          typeof Reflect.get(frame, "message") !== "object" ||
+          Reflect.get(frame, "message") === null
+        )
+          throw Error("Invalid SDK message");
+      }
+      if (incoming && type === "control_request") {
+        const request: unknown = Reflect.get(frame, "request");
+        if (
+          typeof request !== "object" ||
+          request === null ||
+          typeof Reflect.get(request, "subtype") !== "string"
+        )
+          throw Error("Invalid SDK control request");
+        const id = Reflect.get(frame, "request_id");
+        if (typeof id !== "string" || controls.has(id))
+          throw Error("Invalid control request identity");
+        controls.add(id);
+      }
+      if (!incoming && type === "control_response") {
+        const response = Reflect.get(frame, "response");
+        if (typeof response !== "object" || response === null)
+          throw Error("Invalid control response");
+        const id = Reflect.get(response, "request_id");
+        if (typeof id !== "string" || !controls.delete(id))
+          throw Error("Mismatched control response");
+        if (Reflect.get(response, "subtype") === "error") throw Error("SDK control handler failed");
+        settle();
+      }
+    };
+    return (bytes?: Uint8Array) => {
+      remainder += bytes === undefined ? decoder.decode() : decoder.decode(bytes, { stream: true });
+      if (Buffer.byteLength(remainder, "utf8") > 128 * 1024 * 1024)
+        throw Error("SDK frame too large");
+      for (;;) {
+        const i = remainder.indexOf("\n");
+        if (i < 0) break;
+        line(remainder.slice(0, i));
+        remainder = remainder.slice(i + 1);
+      }
+      if (bytes === undefined) {
+        line(remainder);
+        remainder = "";
+      }
+    };
+  };
+  return {
+    beforeSpawn: () => {
+      if (spawnRegistered) {
+        fail("Owned SDK attempted a second child");
+        throw new Error("Owned SDK attempted a second child");
+      }
+      spawnRegistered = true;
+    },
+    canOffer: () => !finishRequested && !failure,
+    promptDone: () => {
+      if (!finishRequested) {
+        fail("Prompt input ended without the owned finish request");
+        return;
+      }
+      promptFinished = true;
+      Deferred.doneUnsafe(promptEOF, Effect.void);
+    },
+    fail,
+    forced: () => {
+      if (!promptFinished || !stdoutFinished || !sdkFinished || controls.size !== 0)
+        fail("Forced SDK cleanup is not natural input completion");
+    },
+    sdkExit: (exit: ClaudeQueryStreamExit) => {
+      if (Exit.isFailure(exit)) {
+        fail("SDK iterator failed or was interrupted");
+        return;
+      }
+      sdkFinished = true;
+      settle();
+    },
+    observe: (actual: NodeChildProcess.ChildProcess): ClaudeSpawnedProcess => {
+      if (child) {
+        fail("Owned SDK transport was rebound");
+        return actual as ClaudeSpawnedProcess;
+      }
+      child = actual;
+      const rawInput = actual.stdin,
+        rawOutput = actual.stdout;
+      if (!rawInput || !rawOutput) {
+        fail("Owned SDK pipes are missing");
+        return actual as ClaudeSpawnedProcess;
+      }
+      Deferred.doneUnsafe(bound, Effect.succeed(actual));
+      actual.once("error", () => {
+        const error = fail("Owned child failed");
+        Deferred.doneUnsafe(childClose, Effect.fail(error));
+      });
+      actual.once("close", (code, signal) => {
+        Deferred.doneUnsafe(childClose, Effect.succeed({ code, signal }));
+      });
+      rawOutput.once("end", () => {
+        Deferred.doneUnsafe(inputEOF, Effect.void);
+      });
+      rawOutput.once("error", () => {
+        const error = fail("Owned stdout failed");
+        Deferred.doneUnsafe(inputEOF, Effect.fail(error));
+      });
+      const incoming = validate(true),
+        outgoing = validate(false);
+      const stdout = new NodeStream.Transform({
+        transform(bytes: Buffer, _encoding, done) {
+          try {
+            incoming(bytes);
+            done(null, bytes);
+          } catch {
+            fail("Malformed owned SDK input");
+            done(new Error("Malformed owned SDK input"));
+          }
+        },
+        flush(done) {
+          try {
+            incoming();
+            stdoutFinished = true;
+            settle();
+            done();
+          } catch {
+            fail("Truncated owned SDK input");
+            done(new Error("Truncated owned SDK input"));
+          }
+        },
+      });
+      stdout.on("error", () => {
+        fail("Owned SDK forwarding failed");
+      });
+      rawOutput.pipe(stdout);
+      const stdin = new NodeStream.Writable({
+        write(bytes: Buffer, _encoding, done) {
+          rawInput.write(bytes, (error) => {
+            if (error) {
+              fail("Owned SDK stdin failed");
+              done(error);
+              return;
+            }
+            try {
+              outgoing(bytes);
+              done();
+            } catch {
+              fail("Invalid owned SDK control response");
+              done(new Error("Invalid owned SDK control response"));
+            }
+          });
+        },
+        final(done) {
+          rawInput.end(() => {
+            try {
+              outgoing();
+              Deferred.doneUnsafe(providerInput, Effect.void);
+              done();
+            } catch {
+              const error = fail("Incomplete owned SDK input write");
+              Deferred.doneUnsafe(providerInput, Effect.fail(error));
+              done(new Error("Incomplete owned SDK input write"));
+            }
+          });
+        },
+      });
+      stdin.on("error", () => {
+        const error = fail("Owned SDK input writer failed");
+        Deferred.doneUnsafe(providerInput, Effect.fail(error));
+      });
+      return {
+        stdin,
+        stdout,
+        get killed() {
+          return actual.killed;
+        },
+        get exitCode() {
+          return actual.exitCode;
+        },
+        get signalCode() {
+          return actual.signalCode;
+        },
+        kill: actual.kill.bind(actual),
+        on: actual.on.bind(actual),
+        once: actual.once.bind(actual),
+        off: actual.off.bind(actual),
+      };
+    },
+    transport: {
+      transport: (timeout: Duration.Input) => wait(bound, timeout),
+      finishInput: Effect.sync(() => {
+        finishRequested = true;
+      }).pipe(Effect.andThen(finishPrompts)),
+      promptEOF: (timeout: Duration.Input) => wait(promptEOF, timeout),
+      providerInput: (timeout: Duration.Input) => wait(providerInput, timeout),
+      childClose: (timeout: Duration.Input) => wait(childClose, timeout),
+      inputEOF: (timeout: Duration.Input) => wait(inputEOF, timeout),
+      parserDispatch: (timeout: Duration.Input) =>
+        wait(parsed, timeout).pipe(
+          Effect.andThen(Effect.suspend(() => (failure ? Effect.fail(failure) : Effect.void))),
+        ),
+      callbacks: (timeout: Duration.Input) =>
+        Effect.suspend(() => wait(callbacks, timeout)).pipe(
+          Effect.andThen(Effect.suspend(() => (failure ? Effect.fail(failure) : Effect.void))),
+        ),
+    } satisfies ClaudeOwnedQueryTransport,
+  };
+};
 
 export interface ClaudeAgentSdkLoggedQueryOptions {
   readonly model: ClaudeAgentSdkQueryOptions["model"];
@@ -914,7 +1251,7 @@ export const layerQueryRunner: Layer.Layer<
     const platform = yield* HostProcess.Platform;
     const runFork = Effect.runForkWith(yield* Effect.context<never>());
 
-    return ClaudeAgentSdkQueryRunner.of({
+    const runner = ClaudeAgentSdkQueryRunner.of({
       allocateSessionId: crypto
         .randomUUIDv4()
         .pipe(Effect.mapError((cause) => queryRunnerError(cause, "allocateSessionId"))),
@@ -928,13 +1265,35 @@ export const layerQueryRunner: Layer.Layer<
           const logProtocolEvent = (event: ClaudeAgentSdkProtocolLogEvent) =>
             protocolLogger === undefined ? Effect.void : protocolLogger(event);
           // A failed open shuts down its queue before retrying, so the old CLI cannot take the prompt.
-          const promptQueue = yield* Queue.unbounded<SDKUserMessage>();
-          const prompt = Stream.fromQueue(promptQueue).pipe(
-            Stream.catchCause((cause) =>
-              Cause.hasInterruptsOnly(cause) ? Stream.empty : Stream.failCause(cause),
-            ),
-            Stream.toAsyncIterable,
-          );
+          const promptQueue = yield* Queue.unbounded<SDKUserMessage, Cause.Done<void>>();
+          const owned =
+            input.observeOwnedInput === true && input.options.spawnClaudeCodeProcess === undefined
+              ? makeOwnedClaudeObservation(Queue.end(promptQueue).pipe(Effect.asVoid))
+              : undefined;
+          const promptStream = Stream.fromQueue(promptQueue);
+          const rawPrompt = (
+            owned
+              ? promptStream
+              : promptStream.pipe(
+                  Stream.catchCause((cause) =>
+                    Cause.hasInterruptsOnly(cause) ? Stream.empty : Stream.failCause(cause),
+                  ),
+                )
+          ).pipe(Stream.toAsyncIterable);
+          const prompt: AsyncIterable<SDKUserMessage> = owned
+            ? {
+                async *[Symbol.asyncIterator]() {
+                  let natural = false;
+                  try {
+                    for await (const message of rawPrompt) yield message;
+                    natural = true;
+                    owned.promptDone();
+                  } finally {
+                    if (!natural) owned.fail("SDK prompt iteration was cancelled");
+                  }
+                },
+              }
+            : rawPrompt;
           // Send MCP credentials over stdin to keep them out of SDK argv and inherited command environments.
           const { mcpServers, ...queryOptions } = input.options;
           // The SDK can prepend a scope wrapper to native binaries; script entries run through node.
@@ -964,7 +1323,9 @@ export const layerQueryRunner: Layer.Layer<
           const spawnProcess =
             options.spawnClaudeCodeProcess ??
             ((spawnOptions: ClaudeSpawnOptions) => {
-              if (platform !== "win32") return spawnClaudeProcessGroup(spawnOptions, stopScope);
+              owned?.beforeSpawn();
+              if (platform !== "win32")
+                return spawnClaudeProcessGroup(spawnOptions, stopScope, owned?.observe);
               const child = NodeChildProcess.spawn(spawnOptions.command, spawnOptions.args, {
                 cwd: spawnOptions.cwd,
                 env: spawnOptions.env,
@@ -975,7 +1336,7 @@ export const layerQueryRunner: Layer.Layer<
               child.stderr
                 .setEncoding("utf8")
                 .on("data", (chunk: string) => options.stderr?.(chunk));
-              return child;
+              return owned ? owned.observe(child) : child;
             });
           let spawnedProcess: ClaudeSpawnedProcess | undefined;
           let processExited = false;
@@ -1077,12 +1438,49 @@ export const layerQueryRunner: Layer.Layer<
                 ),
               ),
             ),
+          ).pipe(
+            Effect.onExit((exit) => {
+              if (!owned || Exit.isSuccess(exit)) return Effect.void;
+              owned.fail("Owned query failed to open");
+              const failedChild = spawnedProcess;
+              if (!failedChild) return Effect.void;
+              return Effect.try({
+                try: () => {
+                  failedChild.kill("SIGKILL");
+                },
+                catch: (cause) => queryRunnerError(cause, "owned-open-cleanup"),
+              }).pipe(
+                Effect.andThen(owned.transport.childClose("10 seconds")),
+                Effect.asVoid,
+                Effect.ignore,
+              );
+            }),
           );
 
+          const sdkMessages: AsyncIterable<SDKMessage> = owned
+            ? {
+                async *[Symbol.asyncIterator]() {
+                  let natural = false;
+                  try {
+                    for await (const message of claudeQueryMessages(queryRuntime)) yield message;
+                    natural = true;
+                    owned.sdkExit(Exit.void);
+                  } finally {
+                    if (!natural) owned.fail("SDK message iteration did not finish naturally");
+                  }
+                },
+              }
+            : claudeQueryMessages(queryRuntime);
           return {
-            messages: Stream.fromAsyncIterable(claudeQueryMessages(queryRuntime), (cause) =>
+            ...(owned ? { ownedTransport: owned.transport } : {}),
+            messages: Stream.fromAsyncIterable(sdkMessages, (cause) =>
               queryRunnerError(cause, "fromAsyncIterable"),
             ).pipe(
+              Stream.onExit((exit) =>
+                Effect.sync(() => {
+                  if (Exit.isFailure(exit)) owned?.sdkExit(exit);
+                }),
+              ),
               Stream.tap((message) =>
                 logProtocolEvent({
                   direction: "incoming",
@@ -1093,9 +1491,15 @@ export const layerQueryRunner: Layer.Layer<
             ),
             offer: (message, onQueued) =>
               Effect.uninterruptibleMask((restore) =>
-                restore(Queue.offer(promptQueue, message)).pipe(
-                  Effect.tap(() => Effect.sync(() => onQueued?.())),
-                ),
+                restore(
+                  Effect.suspend(() =>
+                    owned && !owned.canOffer()
+                      ? Effect.fail(
+                          queryRunnerError(new Error("Owned prompt admission is closed"), "offer"),
+                        )
+                      : Queue.offer(promptQueue, message),
+                  ),
+                ).pipe(Effect.tap(() => Effect.sync(() => onQueued?.()))),
               ).pipe(
                 Effect.asVoid,
                 Effect.tap(() =>
@@ -1183,10 +1587,15 @@ export const layerQueryRunner: Layer.Layer<
                   }),
                 ),
               ),
-            interrupt: Effect.tryPromise({
-              try: () => queryRuntime.interrupt(),
-              catch: (cause) => queryRunnerError(cause, "interrupt"),
+            interrupt: Effect.sync(() => {
+              owned?.forced();
             }).pipe(
+              Effect.andThen(
+                Effect.tryPromise({
+                  try: () => queryRuntime.interrupt(),
+                  catch: (cause) => queryRunnerError(cause, "interrupt"),
+                }),
+              ),
               Effect.tap(() =>
                 logProtocolEvent({
                   direction: "outgoing",
@@ -1197,7 +1606,10 @@ export const layerQueryRunner: Layer.Layer<
                 }),
               ),
             ),
-            close: Queue.shutdown(promptQueue).pipe(
+            close: Effect.sync(() => {
+              owned?.forced();
+            }).pipe(
+              Effect.andThen(Queue.shutdown(promptQueue)),
               Effect.andThen(closeClaudeQuery(queryRuntime)),
               Effect.tap(() =>
                 logProtocolEvent({
@@ -1319,6 +1731,16 @@ export const layerQueryRunner: Layer.Layer<
         },
       ),
       assertComplete: Effect.void,
+    });
+    return ClaudeAgentSdkQueryRunner.of({
+      ...runner,
+      openOwned: Effect.fn("ClaudeAgentSdkQueryRunner.openOwned")((input) =>
+        input.options.spawnClaudeCodeProcess !== undefined
+          ? Effect.fail(
+              queryRunnerError(new Error("Custom spawn has no owned observation"), "openOwned"),
+            )
+          : runner.open({ ...input, observeOwnedInput: true }),
+      ),
     });
   }),
 );
@@ -4225,6 +4647,7 @@ function claudeProposedPlan(input: unknown): string | null {
 }
 
 export interface ClaudeAdapterV2Options {
+  readonly ownedEvents?: boolean;
   readonly instanceId: ProviderInstanceId;
   readonly settings: ClaudeSettings;
   readonly environment: NodeJS.ProcessEnv;
@@ -4242,6 +4665,28 @@ export interface ClaudeAdapterV2Options {
     ) => Effect.Effect<void>;
   };
 }
+
+export interface ClaudeOwnedEventLifecycle {
+  readonly generation: OwnedEvents.OwnedEventGeneration;
+  readonly transport: ClaudeOwnedQueryTransport;
+  readonly seal: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<
+    OwnedEvents.OwnedEventFence,
+    ClaudeAgentSdkQueryRunnerError | OwnedEvents.OwnedEventDrainUnknown
+  >;
+}
+const ownedClaudeLifecycles = new WeakMap<
+  ProviderAdapter.ProviderAdapterV2SessionRuntime,
+  ClaudeOwnedEventLifecycle
+>();
+export const getClaudeOwnedEventLifecycle = (
+  runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+) => ownedClaudeLifecycles.get(runtime);
+const CurrentClaudeProducer = Context.Reference<OwnedEvents.OwnedEventProducer | undefined>(
+  "ClaudeAdapterV2/OwnedEventProducer",
+  { defaultValue: () => undefined },
+);
 
 export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   adapterOptions: ClaudeAdapterV2Options,
@@ -4417,6 +4862,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
     openSession: Effect.fn("ClaudeAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
         const sessionScope = yield* Effect.scope;
+        if (adapterOptions.ownedEvents === true && !queryRunner.openOwned)
+          return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+            driver: CLAUDE_PROVIDER,
+            detail: "Owned query transport API unavailable",
+          });
         const now = yield* DateTime.now;
         const session = providerSession({
           providerSessionId: input.providerSessionId,
@@ -4426,10 +4876,92 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           now,
         });
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        const ownedBroker =
+          adapterOptions.ownedEvents === true
+            ? yield* OwnedEvents.make<ProviderAdapter.ProviderAdapterV2Event>()
+            : undefined;
+        const ownedConsumer = ownedBroker ? yield* ownedBroker.designateConsumer : undefined;
+        let ownedCurrent:
+          | {
+              generation: OwnedEvents.OwnedEventGeneration;
+              transport: ClaudeOwnedQueryTransport;
+              actual: object;
+              readerDone: Deferred.Deferred<void, ClaudeAgentSdkQueryRunnerError>;
+            }
+          | undefined;
+        let ownedExposed: ProviderAdapter.ProviderAdapterV2SessionRuntime | undefined;
+        let ownedAdmissionClosed = false;
+        let ownedControlCount = 0;
+        let ownedControlsDone = Deferred.makeUnsafe<void, ClaudeAgentSdkQueryRunnerError>();
+        let ownedControlFailure: ClaudeAgentSdkQueryRunnerError | undefined;
+        const pendingOwnedEvents: ProviderAdapter.ProviderAdapterV2Event[] = [];
+        const produce = Effect.fn("ClaudeAdapterV2.ownedProducer")(function* <A, E, R>(
+          work: Effect.Effect<A, E, R>,
+        ) {
+          if (!ownedBroker || !ownedCurrent) return yield* work;
+          const generation = ownedCurrent.generation;
+          const parent = yield* CurrentClaudeProducer;
+          const use = (producer: OwnedEvents.OwnedEventProducer) =>
+            work.pipe(Effect.provideService(CurrentClaudeProducer, producer));
+          return yield* (
+            parent
+              ? ownedBroker.continueProducer(parent, use)
+              : ownedBroker.withProducer(generation, use)
+          ).pipe(
+            Effect.onExit((exit) =>
+              Exit.isFailure(exit)
+                ? ownedBroker.invalidate(generation).pipe(Effect.ignore)
+                : Effect.void,
+            ),
+          );
+        });
+        const forkProduced = Effect.fn("ClaudeAdapterV2.forkOwnedProducer")(function* <A, E, R>(
+          work: Effect.Effect<A, E, R>,
+          targetScope: Scope.Scope,
+        ) {
+          if (!ownedBroker || !ownedCurrent) return yield* work.pipe(Effect.forkIn(targetScope));
+          const generation = ownedCurrent.generation;
+          const parent = yield* CurrentClaudeProducer;
+          const start = (producer: OwnedEvents.OwnedEventProducer) =>
+            ownedBroker.forkProducer(producer, (child) =>
+              work.pipe(Effect.provideService(CurrentClaudeProducer, child)),
+            );
+          return yield* (parent ? start(parent) : ownedBroker.withProducer(generation, start)).pipe(
+            Effect.provideService(Scope.Scope, targetScope),
+            Effect.onExit((exit) =>
+              Exit.isFailure(exit)
+                ? ownedBroker.invalidate(generation).pipe(Effect.ignore)
+                : Effect.void,
+            ),
+            Effect.orDie,
+          );
+        });
+        const forkOwned =
+          (targetScope: Scope.Scope) =>
+          <A, E, R>(work: Effect.Effect<A, E, R>) =>
+            forkProduced(work, targetScope);
+        const emitOwned = (event: ProviderAdapter.ProviderAdapterV2Event) =>
+          ownedBroker
+            ? ownedCurrent
+              ? produce(
+                  Effect.gen(function* () {
+                    const producer = yield* CurrentClaudeProducer;
+                    if (!producer)
+                      return yield* Effect.die(new Error("Missing owned Claude event producer"));
+                    yield* ownedBroker.emit(producer, event);
+                  }),
+                ).pipe(Effect.orDie)
+              : Effect.sync(() => {
+                  pendingOwnedEvents.push(event);
+                })
+            : Effect.void;
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
         const taskOutputTails = new Map<
           string,
-          { readonly fiber: Fiber.Fiber<void>; readonly stop: Deferred.Deferred<void> }
+          {
+            readonly fiber: Fiber.Fiber<void, OwnedEvents.OwnedEventDrainUnknown>;
+            readonly stop: Deferred.Deferred<void>;
+          }
         >();
         const taskOutputRoot = claudeTaskOutputRoot(adapterOptions.environment, path);
         // Waits for the tail's last read so its output lands before the call settles.
@@ -4549,7 +5081,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const sessionSubagentsByTaskId = yield* Ref.make(new Map<string, ActiveClaudeSubagent>());
         const sessionSubagentTaskIdsByToolUseId = yield* Ref.make(new Map<string, string>());
         // Claude may never answer a background move; later steers must wait on the same request.
-        const backgroundMovesByToolUseId = new Map<string, Fiber.Fiber<void>>();
+        const backgroundMovesByToolUseId = new Map<
+          string,
+          Fiber.Fiber<void, OwnedEvents.OwnedEventDrainUnknown>
+        >();
         const subagentToolCalls = new Map<string, ActiveClaudeToolCall>();
         const pendingSubagentLaunchesByToolUseId = new Map<string, PendingClaudeSubagentLaunch>();
         const settledTurnByNativeThread = new Map<string, ActiveClaudeTurnContext>();
@@ -4733,7 +5268,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               };
             }
           }
-          return Queue.offer(events, event).pipe(Effect.asVoid);
+          // Owned runtimes are read through the broker alone; a second queue would never drain.
+          return (ownedBroker ? emitOwned(event) : Queue.offer(events, event)).pipe(Effect.asVoid);
         };
 
         const persistAttachmentBudget = Effect.fnUntraced(function* (nativeThreadId: string) {
@@ -6940,6 +7476,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
         });
         const reasoningDeltas = yield* makeProviderTextDeltaCoalescer({
+          ...(ownedBroker
+            ? { forkFlush: (work: Effect.Effect<void>) => forkProduced(work, sessionScope) }
+            : {}),
           flushIntervalMs: 50,
           emit:
             /* Provider events include streaming deltas; avoid a span for each update. */
@@ -7076,7 +7615,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 // An unanswered stop must not delay turn settlement.
                 yield* liveQuery.query
                   .stopTask(taskId)
-                  .pipe(Effect.timeout("15 seconds"), Effect.ignore, Effect.forkIn(sessionScope));
+                  .pipe(Effect.timeout("15 seconds"), Effect.ignore, forkOwned(sessionScope));
               }
               yield* updateClaudeSubagentNode({
                 context: input.context,
@@ -8527,7 +9066,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 }).pipe(
                   Effect.provideService(FileSystem.FileSystem, fileSystem),
                   Effect.provideService(Path.Path, path),
-                  Effect.forkIn(sessionScope),
+                  forkOwned(sessionScope),
                 );
                 taskOutputTails.set(tailedCall.nativeItemId, { fiber, stop });
               }
@@ -9642,6 +10181,20 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const compiledSelection = compileClaudeModelSelection(turnInput.modelSelection);
           const resumeSessionAt = yield* getNativeConversationHeadId(turnInput.providerThread);
           const existing = yield* Ref.get(queryContext);
+          if (
+            ownedCurrent &&
+            (existing === null ||
+              existing.query.ownedTransport !== ownedCurrent.transport ||
+              existing.nativeThreadId !== nativeThreadId ||
+              existing.queryPolicyKey !== queryPolicyKey ||
+              existing.selection.queryIdentity !== compiledSelection.queryIdentity ||
+              existing.stopping)
+          ) {
+            return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+              driver: CLAUDE_PROVIDER,
+              detail: "An owned runtime cannot replace its physical query",
+            });
+          }
           // Continuations drain existing output without prompting; retain the live process regardless of selection.
           if (
             existing !== null &&
@@ -9768,24 +10321,108 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(appendSystemPromptFileText === undefined ? {} : { appendSystemPromptFileText }),
             ...(toolSearchOverride === undefined ? {} : { toolSearchOverride }),
           });
-          const querySession = yield* queryRunner
-            .open({
-              threadId: turnInput.threadId,
-              providerSessionId: input.providerSessionId,
-              options: queryOptions,
-            })
-            .pipe(
-              Effect.onError(() =>
-                closedExistingNativeThreadId === nativeThreadId
-                  ? Effect.gen(function* () {
-                      yield* clearWakeStateForNativeThread(nativeThreadId);
-                      yield* resetBackgroundTaskStateForNativeThreadProcess(nativeThreadId, {
-                        status: "idle",
-                      });
-                    })
-                  : Effect.void,
+          const openQueryTransport = ownedBroker ? queryRunner.openOwned : queryRunner.open;
+          if (!openQueryTransport)
+            return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+              driver: CLAUDE_PROVIDER,
+              detail: "Owned query transport API unavailable",
+            });
+          const querySession = yield* openQueryTransport({
+            threadId: turnInput.threadId,
+            providerSessionId: input.providerSessionId,
+            options: queryOptions,
+          }).pipe(
+            Effect.onError(() =>
+              closedExistingNativeThreadId === nativeThreadId
+                ? Effect.gen(function* () {
+                    yield* clearWakeStateForNativeThread(nativeThreadId);
+                    yield* resetBackgroundTaskStateForNativeThreadProcess(nativeThreadId, {
+                      status: "idle",
+                    });
+                  })
+                : Effect.void,
+            ),
+          );
+          if (ownedBroker) {
+            const transport = querySession.ownedTransport;
+            if (!transport) {
+              yield* querySession.close.pipe(Effect.ignore);
+              return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                driver: CLAUDE_PROVIDER,
+                detail: "Owned query transport observations are unavailable",
+              });
+            }
+            const actual = yield* transport.transport("5 seconds");
+            const generation = yield* ownedBroker.bindTransport(actual);
+            ownedCurrent = { generation, transport, actual, readerDone: Deferred.makeUnsafe() };
+            for (const event of pendingOwnedEvents.splice(0)) yield* emitOwned(event);
+            const observation = ownedCurrent;
+            if (!ownedExposed)
+              return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                driver: CLAUDE_PROVIDER,
+                detail: "Owned runtime identity is unavailable",
+              });
+            ownedClaudeLifecycles.set(ownedExposed, {
+              generation,
+              transport,
+              seal: Effect.fn("ClaudeAdapterV2.sealOwnedEventPrefix")(
+                function* (timeout: Duration.Input) {
+                  if (yield* CurrentClaudeProducer)
+                    return yield* new OwnedEvents.OwnedEventDrainUnknown({
+                      reason: "joinWhileProducing",
+                    });
+                  ownedAdmissionClosed = true;
+                  if (ownedControlCount === 0)
+                    Deferred.doneUnsafe(
+                      ownedControlsDone,
+                      ownedControlFailure ? Effect.fail(ownedControlFailure) : Effect.void,
+                    );
+                  yield* Deferred.await(ownedControlsDone).pipe(
+                    Effect.timeoutOrElse({
+                      duration: timeout,
+                      orElse: () =>
+                        Effect.fail(
+                          queryRunnerError(
+                            new Error("Owned controls did not join"),
+                            "owned-controls",
+                          ),
+                        ),
+                    }),
+                  );
+                  yield* transport.finishInput;
+                  yield* transport.promptEOF(timeout);
+                  yield* transport.providerInput(timeout);
+                  yield* transport.childClose(timeout);
+                  yield* transport.inputEOF(timeout);
+                  yield* transport.parserDispatch(timeout);
+                  yield* transport.callbacks(timeout);
+                  yield* Deferred.await(observation.readerDone).pipe(
+                    Effect.timeoutOrElse({
+                      duration: timeout,
+                      orElse: () =>
+                        Effect.fail(
+                          queryRunnerError(
+                            new Error("Owned adapter reader did not join"),
+                            "owned-reader",
+                          ),
+                        ),
+                    }),
+                  );
+                  yield* reasoningDeltas.flushAndJoin;
+                  yield* ownedBroker.closeRoots(generation);
+                  return yield* ownedBroker.seal(generation, actual, { timeout });
+                },
+                (effect) =>
+                  effect.pipe(
+                    Effect.onExit((exit) =>
+                      Exit.isFailure(exit)
+                        ? ownedBroker.invalidate(generation).pipe(Effect.ignore)
+                        : Effect.void,
+                    ),
+                  ),
               ),
-            );
+            });
+          }
           // Mark only successful opens; retries must not resume sessions that failed to create.
           yield* Ref.update(openedNativeThreads, (current) => {
             if (current.has(nativeThreadId)) {
@@ -9819,6 +10456,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ),
           };
           yield* Ref.set(queryContext, context);
+          const readerObservation = ownedCurrent;
+          let readerFailure: ClaudeAgentSdkQueryRunnerError | undefined;
           yield* querySession.messages.pipe(
             Stream.runForEach((message) =>
               sdkMessageLock.withPermits(1)(
@@ -9844,6 +10483,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ),
             ),
             Effect.exit,
+            Effect.tap((exit) =>
+              Effect.sync(() => {
+                if (Exit.isFailure(exit))
+                  readerFailure = queryRunnerError(
+                    new Error("Owned adapter reader failed"),
+                    "owned-reader",
+                  );
+              }),
+            ),
             Effect.flatMap(
               Effect.fnUntraced(function* (exit: ClaudeQueryStreamExit) {
                 const heldContext = yield* Ref.get(activeTurn);
@@ -9870,7 +10518,24 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               }),
             ),
             Effect.ensuring(Deferred.succeed(closed, undefined)),
-            Effect.forkIn(sessionScope),
+            Effect.onExit((exit) =>
+              Effect.sync(() => {
+                if (!readerObservation) return;
+                if (readerFailure || Exit.isFailure(exit))
+                  Deferred.doneUnsafe(
+                    readerObservation.readerDone,
+                    Effect.fail(
+                      readerFailure ??
+                        queryRunnerError(
+                          new Error("Owned adapter finalization failed"),
+                          "owned-reader",
+                        ),
+                    ),
+                  );
+                else Deferred.doneUnsafe(readerObservation.readerDone, Effect.void);
+              }),
+            ),
+            forkOwned(sessionScope),
           );
           return context;
         });
@@ -10185,7 +10850,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                         }),
                       ),
                     ),
-                    Effect.forkIn(sessionScope),
+                    forkOwned(sessionScope),
                   );
                 }
               }),
@@ -10318,7 +10983,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           for (const [toolUseId, move] of backgroundMovesByToolUseId) {
             if (move.pollUnsafe() !== undefined) backgroundMovesByToolUseId.delete(toolUseId);
           }
-          const moves: Array<Fiber.Fiber<void>> = [];
+          const moves: Array<Fiber.Fiber<void, OwnedEvents.OwnedEventDrainUnknown>> = [];
           for (const { taskId, toolUseId } of foreground) {
             const inFlight = backgroundMovesByToolUseId.get(toolUseId);
             if (inFlight !== undefined) {
@@ -10347,7 +11012,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   cause,
                 }),
               ),
-              Effect.forkIn(sessionScope),
+              forkOwned(sessionScope),
             );
             backgroundMovesByToolUseId.set(toolUseId, move);
             moves.push(move);
@@ -10531,6 +11196,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         );
 
         const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
+          ...(ownedConsumer ? { ownedEventConsumer: ownedConsumer } : {}),
           instanceId: adapterOptions.instanceId,
           driver: CLAUDE_PROVIDER,
           providerSessionId: input.providerSessionId,
@@ -10984,7 +11650,95 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           ),
         };
 
-        return runtime;
+        const wrapOwnedControl =
+          <A, B>(
+            operation: (value: A) => Effect.Effect<B, ProviderAdapter.ProviderAdapterV2Error>,
+          ) =>
+          (value: A) =>
+            Effect.acquireUseRelease(
+              Effect.suspend(() => {
+                if (ownedAdmissionClosed || ownedControlFailure)
+                  return Effect.fail(
+                    new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver: CLAUDE_PROVIDER,
+                      detail: "Owned runtime input is closed",
+                    }),
+                  );
+                return Effect.sync(() => {
+                  if (ownedControlCount++ === 0) ownedControlsDone = Deferred.makeUnsafe();
+                });
+              }),
+              () =>
+                produce(operation(value)).pipe(
+                  Effect.mapError((error) =>
+                    error._tag === "OwnedEventDrainUnknown"
+                      ? new ProviderAdapter.ProviderAdapterProtocolError({
+                          driver: CLAUDE_PROVIDER,
+                          detail: error.reason,
+                          payload: error,
+                        })
+                      : error,
+                  ),
+                ),
+              (_, exit) =>
+                Effect.sync(() => {
+                  if (Exit.isFailure(exit))
+                    ownedControlFailure ??= queryRunnerError(
+                      new Error("Owned control failed"),
+                      "owned-control",
+                    );
+                  ownedControlCount--;
+                  if (ownedControlCount === 0)
+                    Deferred.doneUnsafe(
+                      ownedControlsDone,
+                      ownedControlFailure ? Effect.fail(ownedControlFailure) : Effect.void,
+                    );
+                }),
+            );
+        const exposed: ProviderAdapter.ProviderAdapterV2SessionRuntime = ownedBroker
+          ? {
+              ...runtime,
+              ensureThread: wrapOwnedControl(runtime.ensureThread),
+              resumeThread: wrapOwnedControl(runtime.resumeThread),
+              startTurn: wrapOwnedControl(runtime.startTurn),
+              steerTurn: wrapOwnedControl(runtime.steerTurn),
+              interruptTurn: wrapOwnedControl(runtime.interruptTurn),
+              respondToRuntimeRequest: wrapOwnedControl(runtime.respondToRuntimeRequest),
+              readThreadSnapshot: wrapOwnedControl(runtime.readThreadSnapshot),
+              rollbackThread: wrapOwnedControl(runtime.rollbackThread),
+              forkThread: wrapOwnedControl(runtime.forkThread),
+              ...(runtime.injectHistory
+                ? { injectHistory: wrapOwnedControl(runtime.injectHistory) }
+                : {}),
+              ...(runtime.compactThread
+                ? { compactThread: wrapOwnedControl(runtime.compactThread) }
+                : {}),
+              ...(runtime.stopTask ? { stopTask: wrapOwnedControl(runtime.stopTask) } : {}),
+              ...(runtime.awaitBackgroundTasks
+                ? { awaitBackgroundTasks: wrapOwnedControl(runtime.awaitBackgroundTasks) }
+                : {}),
+              ...(runtime.stopSubagent
+                ? { stopSubagent: wrapOwnedControl(runtime.stopSubagent) }
+                : {}),
+              ...(runtime.unloadThread
+                ? { unloadThread: wrapOwnedControl(runtime.unloadThread) }
+                : {}),
+              ...(runtime.uploadFeedback
+                ? { uploadFeedback: wrapOwnedControl(runtime.uploadFeedback) }
+                : {}),
+              ...(runtime.mcpApps
+                ? {
+                    mcpApps: {
+                      listTools: wrapOwnedControl(runtime.mcpApps.listTools),
+                      callTool: wrapOwnedControl(runtime.mcpApps.callTool),
+                      readResource: wrapOwnedControl(runtime.mcpApps.readResource),
+                    },
+                  }
+                : {}),
+            }
+          : runtime;
+        ownedExposed = exposed;
+        return exposed;
       },
       (effect, input) =>
         effect.pipe(

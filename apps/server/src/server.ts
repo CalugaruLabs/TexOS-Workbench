@@ -1,5 +1,8 @@
 import * as NativeStartupLayers from "./nativeTexos/StartupLayers.ts";
 import * as NativeAgentsHttp from "./nativeTexos/agentsHttp.ts";
+import * as NativeExecution from "./nativeTexos/executionLive.ts";
+import * as NativeExecutionReceipts from "./nativeTexos/executionReceipts.ts";
+import * as ProviderOrchestrationAdapterInfrastructure from "./provider/ProviderOrchestrationAdapterInfrastructure.ts";
 import { isNativeTexos, nativeHttpAllowed, nativeStartupProblem } from "./nativeTexos/profile.ts";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
@@ -631,6 +634,14 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.suspend(() => (isNativeTexos() ? Layer.empty : ReplayMarkers.layer)),
   Layer.effectDiscard(
     Effect.suspend(() => (isNativeTexos() ? Effect.void : ProjectSettingsOverrideSweep.sweep)),
+  ),
+  Layer.suspend(() =>
+    isNativeTexos()
+      ? NativeExecution.layer.pipe(
+          Layer.provide(NativeExecutionReceipts.layer),
+          Layer.provide(ProviderOrchestrationAdapterInfrastructure.layer),
+        )
+      : Layer.empty,
   ),
 ).pipe(
   Layer.provideMerge(layerOrchestrationApplication),

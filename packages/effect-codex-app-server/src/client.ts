@@ -1,5 +1,8 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import type * as Duration from "effect/Duration";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -20,6 +23,7 @@ import {
 import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
 
 export interface CodexAppServerClientOptions {
+  readonly observeOwnedInput?: boolean;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   readonly logger?: (
@@ -27,7 +31,19 @@ export interface CodexAppServerClientOptions {
   ) => Effect.Effect<void, never>;
 }
 
+export interface CodexOwnedTransportObservation {
+  readonly transport: object;
+  readonly input: CodexProtocol.CodexOwnedInputObservation;
+  readonly childExit: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<number, CodexError.CodexAppServerError>;
+  readonly stderrEOF: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<void, CodexError.CodexAppServerError>;
+}
+
 interface CodexAppServerClientRaw {
+  readonly ownedInput?: CodexProtocol.CodexOwnedInputObservation;
   readonly notifications: CodexProtocol.CodexAppServerPatchedProtocol["incomingNotifications"];
   readonly requests: CodexProtocol.CodexAppServerPatchedProtocol["incomingRequests"];
   readonly request: CodexProtocol.CodexAppServerPatchedProtocol["request"];
@@ -39,6 +55,7 @@ interface CodexAppServerClientRaw {
 export class CodexAppServerClient extends Context.Service<
   CodexAppServerClient,
   {
+    readonly ownedTransport?: CodexOwnedTransportObservation;
     readonly raw: CodexAppServerClientRaw;
     readonly request: <M extends CodexRpc.ClientRequestMethod>(
       method: M,
@@ -152,7 +169,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
 
   const dispatchNotification = (
     notification: CodexProtocol.CodexAppServerIncomingNotification,
-  ): Effect.Effect<void, never> => {
+  ): Effect.Effect<void, CodexError.CodexAppServerError> => {
     const schema =
       notification.method in CodexRpc.SERVER_NOTIFICATION_PARAMS
         ? CodexRpc.SERVER_NOTIFICATION_PARAMS[
@@ -162,17 +179,22 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     const handlers = notificationHandlers.get(notification.method) ?? [];
 
     if (schema) {
-      return decodeNotificationPayload(notification.method, schema, notification.params).pipe(
+      const decoded = decodeNotificationPayload(
+        notification.method,
+        schema,
+        notification.params,
+      ).pipe(
         Effect.flatMap((decoded) =>
           Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
         ),
-        Effect.ignore,
       );
+      return options.observeOwnedInput === true ? decoded : decoded.pipe(Effect.ignore);
     }
 
-    return unknownNotificationHandler
-      ? unknownNotificationHandler(notification.method, notification.params).pipe(Effect.ignore)
+    const handled = unknownNotificationHandler
+      ? unknownNotificationHandler(notification.method, notification.params)
       : Effect.void;
+    return options.observeOwnedInput === true ? handled : handled.pipe(Effect.ignore);
   };
 
   const dispatchRequest = (
@@ -197,6 +219,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
 
   const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
     stdio,
+    ...(options.observeOwnedInput === true ? { observeOwnedInput: true } : {}),
     ...(terminationError ? { terminationError } : {}),
     ...(options.logIncoming !== undefined ? { logIncoming: options.logIncoming } : {}),
     ...(options.logOutgoing !== undefined ? { logOutgoing: options.logOutgoing } : {}),
@@ -231,6 +254,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
 
   return CodexAppServerClient.of({
     raw: {
+      ...(transport.ownedInput ? { ownedInput: transport.ownedInput } : {}),
       notifications: transport.incomingNotifications,
       requests: transport.incomingRequests,
       request: transport.request,
@@ -282,6 +306,61 @@ export const layerChildProcess = (
 const makeChildProcessClient = Effect.fn(
   "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
 )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
-  yield* Stream.runDrain(handle.stderr).pipe(Effect.ignore, Effect.forkScoped);
-  return yield* make(makeChildStdio(handle), options, makeTerminationError(handle));
+  const stderr = yield* Deferred.make<void, CodexError.CodexAppServerError>();
+  yield* Stream.runDrain(handle.stderr).pipe(
+    Effect.onExit((exit) =>
+      Exit.isSuccess(exit)
+        ? Deferred.succeed(stderr, undefined)
+        : Deferred.fail(
+            stderr,
+            new CodexError.CodexAppServerTransportError({
+              operation: "read-input-stream",
+              cause: exit.cause,
+            }),
+          ),
+    ),
+    Effect.ignore,
+    Effect.forkScoped,
+  );
+  const client = yield* make(makeChildStdio(handle), options, makeTerminationError(handle));
+  const input = client.raw.ownedInput;
+  if (!input) return client;
+  const observed = {
+    transport: handle,
+    input,
+    childExit: (timeout: Duration.Input) =>
+      handle.exitCode.pipe(
+        Effect.mapError(
+          (cause) =>
+            new CodexError.CodexAppServerTransportError({
+              operation: "read-process-exit-status",
+              cause,
+            }),
+        ),
+        Effect.timeoutOrElse({
+          duration: timeout,
+          orElse: () =>
+            Effect.fail(
+              new CodexError.CodexAppServerTransportError({
+                operation: "read-process-exit-status",
+                cause: "Child has not exited",
+              }),
+            ),
+        }),
+      ),
+    stderrEOF: (timeout: Duration.Input) =>
+      Deferred.await(stderr).pipe(
+        Effect.timeoutOrElse({
+          duration: timeout,
+          orElse: () =>
+            Effect.fail(
+              new CodexError.CodexAppServerTransportError({
+                operation: "read-input-stream",
+                cause: "Stderr EOF unobserved",
+              }),
+            ),
+        }),
+      ),
+  } satisfies CodexOwnedTransportObservation;
+  return CodexAppServerClient.of({ ...client, ownedTransport: observed });
 });

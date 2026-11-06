@@ -3,6 +3,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
+import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
@@ -10,6 +11,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
+import { makeInMemoryStdio } from "./_internal/stdio.ts";
+import * as CodexError from "./errors.ts";
 
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
@@ -28,6 +31,67 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       });
       return yield* spawner.spawn(command);
     });
+
+  it.effect("owned child, EOF, parser and provider-input joins come from the actual client", () =>
+    Effect.gen(function* () {
+      const handle = yield* makeHandle();
+      const context = yield* Layer.build(
+        CodexClient.layerChildProcess(handle, { observeOwnedInput: true }),
+      );
+      const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+        Effect.provide(context),
+      );
+      const owned = client.ownedTransport;
+      assert.ok(owned);
+      assert.strictEqual(owned.transport, handle);
+      yield* client.request("initialize", {
+        clientInfo: { name: "owned-input-test", title: "Owned test", version: "0" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: null },
+      });
+      yield* owned.input.finishInput;
+      yield* owned.input.providerInput("1 second");
+      assert.equal(yield* owned.childExit("1 second"), 0);
+      yield* owned.input.inputEOF("1 second");
+      yield* owned.input.parserDispatch("1 second");
+      yield* owned.stderrEOF("1 second");
+    }),
+  );
+
+  it.effect("owned notification schema errors survive the ordinary ignore path", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const client = yield* CodexClient.make(stdio, { observeOwnedInput: true });
+      assert.equal(client.ownedTransport, undefined);
+      const owned = client.raw.ownedInput;
+      assert.ok(owned);
+      yield* Queue.offer(
+        input,
+        new TextEncoder().encode('{"method":"item/agentMessage/delta","params":{"delta":123}}\n'),
+      );
+      yield* Queue.end(input);
+      assert.isTrue(Exit.isFailure(yield* owned.parserDispatch("1 second").pipe(Effect.exit)));
+    }),
+  );
+
+  it.effect("owned notification-handler failure survives the ordinary ignore path", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const client = yield* CodexClient.make(stdio, { observeOwnedInput: true });
+      const owned = client.raw.ownedInput;
+      assert.ok(owned);
+      yield* client.handleUnknownServerNotification(() =>
+        Effect.fail(
+          new CodexError.CodexAppServerTransportError({
+            operation: "read-input-stream",
+            cause: "controlled handler failure",
+          }),
+        ),
+      );
+      yield* Queue.offer(input, new TextEncoder().encode('{"method":"owned/test"}\n'));
+      yield* Queue.end(input);
+      assert.isTrue(Exit.isFailure(yield* owned.parserDispatch("1 second").pipe(Effect.exit)));
+    }),
+  );
 
   it.effect("initializes, handles typed server requests, and reads account and skills data", () =>
     Effect.gen(function* () {

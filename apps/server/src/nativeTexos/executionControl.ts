@@ -9,6 +9,7 @@ import * as Semaphore from "effect/Semaphore";
 
 import {
   EXECUTION_CAPABILITY,
+  MANAGED_EXECUTION_CAPABILITY,
   decodeNativeAuthorization,
   executionEnvelope,
   type ExecutionChannelBinding,
@@ -18,6 +19,7 @@ import {
 } from "./executionProtocol.ts";
 import * as Receipts from "./executionReceipts.ts";
 import { validateExecutionWorktree } from "./executionWorktree.ts";
+import { ManagedExecutionProvider } from "./executionManaged.ts";
 
 export class ExecutionControlError extends Schema.TaggedError<ExecutionControlError>()(
   "ExecutionControlError",
@@ -108,11 +110,18 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
   const binding = Object.freeze({ ...expectedBinding });
   const receipts = yield* Receipts.ExecutionReceipts;
   const providerOption = yield* Effect.serviceOption(ControlledExecutionProvider);
-  const provider = Option.getOrUndefined(providerOption);
+  const controlled = Option.getOrUndefined(providerOption);
+  const managed = Option.getOrUndefined(yield* Effect.serviceOption(ManagedExecutionProvider));
+  const provider = controlled && managed ? undefined : (controlled ?? managed);
+  const available =
+    provider !== undefined && (provider.mode === "controlled-codex" || provider.available);
+  const capability =
+    provider?.mode === "controlled-codex" ? EXECUTION_CAPABILITY : MANAGED_EXECUTION_CAPABILITY;
   const scope = yield* Scope.Scope;
   const permit = yield* Semaphore.make(1);
   const live = new Map<string, LiveAttempt>();
   let closed = false;
+  // Calling makeExecutionControl activates receipt recovery; provider construction alone does not.
   yield* receipts.recoverInterrupted;
 
   const current = Effect.fn("ExecutionControl.current")(function* (item: LiveAttempt) {
@@ -212,7 +221,7 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
       );
       if (!starting) return;
       yield* gate(item, authorize);
-      if (!provider || provider.mode !== "controlled-codex")
+      if (!provider || !available)
         return yield* new ExecutionControlError({ code: "executionUnavailable" });
       const recordMappings = Effect.fn("ExecutionControl.recordMappings")(
         function* (patch: Receipts.ExecutionMappings) {
@@ -309,8 +318,8 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
         return yield* new ExecutionControlError({ code: "staleExecutionAuthority" });
       }
       if (request.method === "execution.hello")
-        return provider?.mode === "controlled-codex" && authorize
-          ? { capabilities: [EXECUTION_CAPABILITY], runtimeID: receipts.runtimeID }
+        return available && authorize
+          ? { capabilities: [capability], runtimeID: receipts.runtimeID }
           : { capabilities: [] };
       if (request.method !== "execution.admit") {
         const saved = yield* receipts.get(
@@ -358,10 +367,15 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
         return yield* new ExecutionControlError({ code: "executionScopeMismatch" });
       const existing = yield* receipts.get(intent.commandID, envelope.digest, binding.authorityID);
       if (existing) return executionReceiptView(existing);
-      if (provider?.mode !== "controlled-codex" || !authorize)
+      if (!provider || !available || !authorize)
         return yield* new ExecutionControlError({ code: "executionUnavailable" });
-      if (intent.configuration.provider !== "codex")
+      if (provider.mode === "controlled-codex" && intent.configuration.provider !== "codex")
         return yield* new ExecutionControlError({ code: "claudeCompletionUnsupported" });
+      if (
+        provider.mode === "managed-cli-subscription" &&
+        !provider.supports(intent.configuration.provider)
+      )
+        return yield* new ExecutionControlError({ code: "managedRouteUnavailable" });
       if (live.size !== 0 || (yield* receipts.hasUnresolved))
         return yield* new ExecutionControlError({ code: "executionCapacityOccupied" });
       const admitted = yield* receipts.admit(intent);

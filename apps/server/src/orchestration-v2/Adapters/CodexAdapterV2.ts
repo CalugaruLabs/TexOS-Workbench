@@ -84,6 +84,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -150,6 +151,8 @@ import {
 } from "@t3tools/provider-core/server/subagentProjection";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as OwnedEvents from "@t3tools/provider-core/server/OwnedAdapterEventBroker";
+import type * as Duration from "effect/Duration";
 
 const CODEX_PROVIDER = ProviderDriverKind.make("codex");
 export const CODEX_DRIVER_KIND = CODEX_PROVIDER;
@@ -1272,7 +1275,9 @@ type CodexSubAgentActivityItem = Extract<
 >;
 
 export interface CodexAppServerClientFactoryShape {
+  readonly openOwned?: CodexAppServerClientFactoryShape["open"];
   readonly open: (input: {
+    readonly observeOwnedInput?: boolean;
     readonly instanceId: ProviderInstanceId;
     readonly threadId: ThreadId;
     readonly providerSessionId: OrchestrationV2ProviderSession["id"];
@@ -1468,7 +1473,7 @@ export const layerAppServerClientFactory: Layer.Layer<
     const { native: nativeEventLogger } = yield* ProviderEventLoggers.ProviderEventLoggers;
     const agentScope = yield* AgentScope;
 
-    return CodexAppServerClientFactory.of({
+    const factory = CodexAppServerClientFactory.of({
       open: Effect.fn("CodexAdapterV2.open")(function* (input) {
         const scope = yield* Scope.Scope;
         const environment = {
@@ -1499,19 +1504,27 @@ export const layerAppServerClientFactory: Layer.Layer<
           threadId: input.threadId,
           providerSessionId: input.providerSessionId,
         });
-        const clientOptions: CodexClient.CodexAppServerClientOptions =
-          protocolLogger === undefined
+        const clientOptions: CodexClient.CodexAppServerClientOptions = {
+          ...(input.observeOwnedInput === true ? { observeOwnedInput: true } : {}),
+          ...(protocolLogger === undefined
             ? {}
             : {
                 logIncoming: true,
                 logOutgoing: true,
                 logger: protocolLogger,
-              };
+              }),
+        };
         const context = yield* Layer.build(CodexClient.layerChildProcess(handle, clientOptions));
         return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
           Effect.provide(context),
         );
       }),
+    });
+    return CodexAppServerClientFactory.of({
+      ...factory,
+      openOwned: Effect.fn("CodexAdapterV2.openOwnedClient")((input) =>
+        factory.open({ ...input, observeOwnedInput: true }),
+      ),
     });
   }),
 );
@@ -1579,6 +1592,7 @@ export const CodexAdapterV2Driver: ProviderAdapterDriver<CodexSettings, CodexAda
 };
 
 export interface CodexAdapterV2Options {
+  readonly ownedEvents?: boolean;
   readonly instanceId: ProviderInstanceId;
   readonly settings: CodexSettings;
   readonly environment: NodeJS.ProcessEnv;
@@ -1596,6 +1610,29 @@ export interface CodexAdapterV2Options {
     ) => Effect.Effect<void>;
   };
 }
+
+export interface CodexOwnedEventLifecycle {
+  readonly generation: OwnedEvents.OwnedEventGeneration;
+  readonly transport: CodexClient.CodexOwnedTransportObservation;
+  readonly seal: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<
+    OwnedEvents.OwnedEventFence,
+    CodexErrors.CodexAppServerError | OwnedEvents.OwnedEventDrainUnknown
+  >;
+}
+
+const ownedEventLifecycles = new WeakMap<
+  ProviderAdapter.ProviderAdapterV2SessionRuntime,
+  CodexOwnedEventLifecycle
+>();
+export const getCodexOwnedEventLifecycle = (
+  runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+) => ownedEventLifecycles.get(runtime);
+const CurrentCodexProducer = Context.Reference<OwnedEvents.OwnedEventProducer | undefined>(
+  "CodexAdapterV2/OwnedEventProducer",
+  { defaultValue: () => undefined },
+);
 
 export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   adapterOptions: CodexAdapterV2Options,
@@ -1619,6 +1656,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     openSession: Effect.fn("CodexAdapterV2.openSession")(
       function* (input) {
         const scope = yield* Scope.Scope;
+        const openClient =
+          adapterOptions.ownedEvents === true ? clientFactory.openOwned : clientFactory.open;
+        if (!openClient)
+          return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
+            driver: CODEX_PROVIDER,
+            providerSessionId: input.providerSessionId,
+            cause: "Owned transport API unavailable",
+          });
         const resolvedRuntime =
           adapterOptions.resolveRuntime === undefined
             ? undefined
@@ -1632,7 +1677,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                 ),
               );
-        const client = yield* clientFactory.open({
+        const baseClient = yield* openClient({
+          ...(adapterOptions.ownedEvents === true ? { observeOwnedInput: true } : {}),
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
           providerSessionId: input.providerSessionId,
@@ -1640,6 +1686,109 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           settings: resolvedRuntime?.config ?? adapterOptions.settings,
           environment: resolvedRuntime?.environment ?? adapterOptions.environment,
         });
+        const ownedTransport =
+          adapterOptions.ownedEvents === true ? baseClient.ownedTransport : undefined;
+        if (adapterOptions.ownedEvents === true && !ownedTransport)
+          return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
+            driver: CODEX_PROVIDER,
+            providerSessionId: input.providerSessionId,
+            cause: "Owned transport observations unavailable",
+          });
+        const owned = ownedTransport
+          ? yield* Effect.gen(function* () {
+              const broker = yield* OwnedEvents.make<ProviderAdapter.ProviderAdapterV2Event>();
+              const generation = yield* broker.bindTransport(ownedTransport.transport);
+              const consumer = yield* broker.designateConsumer;
+              return { broker, generation, consumer, transport: ownedTransport };
+            })
+          : undefined;
+        const produce = Effect.fn("CodexAdapterV2.ownedProducer")(function* <A, E, R>(
+          work: Effect.Effect<A, E, R>,
+        ) {
+          if (!owned) return yield* work;
+          const parent = yield* CurrentCodexProducer;
+          const use = (producer: OwnedEvents.OwnedEventProducer) =>
+            work.pipe(Effect.provideService(CurrentCodexProducer, producer));
+          return yield* (
+            parent
+              ? owned.broker.continueProducer(parent, use)
+              : owned.broker.withProducer(owned.generation, use)
+          ).pipe(
+            Effect.onExit((exit) =>
+              Exit.isFailure(exit)
+                ? owned.broker.invalidate(owned.generation).pipe(Effect.ignore)
+                : Effect.void,
+            ),
+          );
+        });
+        const nativeProducer = <A, R>(work: Effect.Effect<A, CodexErrors.CodexAppServerError, R>) =>
+          produce(work).pipe(
+            Effect.mapError((error) =>
+              error._tag === "OwnedEventDrainUnknown"
+                ? new CodexErrors.CodexAppServerTransportError({
+                    operation: "read-input-stream",
+                    cause: error,
+                  })
+                : error,
+            ),
+          );
+        const client = owned
+          ? CodexClient.CodexAppServerClient.of({
+              ...baseClient,
+              handleServerNotification: Effect.fn("CodexAdapterV2.registerOwnedNotification")(
+                (method, handler) =>
+                  baseClient.handleServerNotification(method, (payload) =>
+                    nativeProducer(handler(payload)),
+                  ),
+              ),
+              handleServerRequest: Effect.fn("CodexAdapterV2.registerOwnedRequest")(
+                (method, handler) =>
+                  baseClient.handleServerRequest(method, (payload) =>
+                    nativeProducer(handler(payload)),
+                  ),
+              ),
+              handleUnknownServerNotification: Effect.fn(
+                "CodexAdapterV2.registerOwnedUnknownNotification",
+              )((handler) =>
+                baseClient.handleUnknownServerNotification((method, payload) =>
+                  nativeProducer(handler(method, payload)),
+                ),
+              ),
+              handleUnknownServerRequest: Effect.fn("CodexAdapterV2.registerOwnedUnknownRequest")(
+                (handler) =>
+                  baseClient.handleUnknownServerRequest((method, payload) =>
+                    nativeProducer(handler(method, payload)),
+                  ),
+              ),
+            })
+          : baseClient;
+        const forkProduced = Effect.fn("CodexAdapterV2.forkOwnedProducer")(function* <A, E, R>(
+          work: Effect.Effect<A, E, R>,
+          targetScope: Scope.Scope,
+          options?: { readonly startImmediately?: boolean },
+        ) {
+          if (!owned) return yield* work.pipe(Effect.forkIn(targetScope, options));
+          const parent = yield* CurrentCodexProducer;
+          const start = (producer: OwnedEvents.OwnedEventProducer) =>
+            owned.broker.forkProducer(producer, (child) =>
+              work.pipe(Effect.provideService(CurrentCodexProducer, child)),
+            );
+          return yield* (
+            parent ? start(parent) : owned.broker.withProducer(owned.generation, start)
+          ).pipe(
+            Effect.provideService(Scope.Scope, targetScope),
+            Effect.onExit((exit) =>
+              Exit.isFailure(exit)
+                ? owned.broker.invalidate(owned.generation).pipe(Effect.ignore)
+                : Effect.void,
+            ),
+            Effect.orDie,
+          );
+        });
+        const forkOwned =
+          (targetScope: Scope.Scope, options?: { readonly startImmediately?: boolean }) =>
+          <A, E, R>(work: Effect.Effect<A, E, R>) =>
+            forkProduced(work, targetScope, options);
         const additionalContextByThread = yield* Ref.make(
           new Map<
             string,
@@ -1822,8 +1971,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const latestGoalTurnId = (providerTurnId: ProviderTurnId) =>
           goalRuns.get(providerTurnId)?.at(-1)?.providerTurnId ?? providerTurnId;
 
+        // Owned runtimes are read through the broker alone; a second queue would never drain.
         const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
-          Queue.offer(events, event).pipe(Effect.asVoid);
+          (owned
+            ? produce(
+                Effect.gen(function* () {
+                  const producer = yield* CurrentCodexProducer;
+                  if (!producer)
+                    return yield* Effect.die(new Error("Missing owned event producer"));
+                  yield* owned.broker.emit(producer, event);
+                }),
+              ).pipe(Effect.orDie)
+            : Queue.offer(events, event)
+          ).pipe(Effect.asVoid);
 
         // Setting a goal passes through cleared and paused states; publish only the result.
         const goalUpdatesHeld = new Set<string>();
@@ -2031,7 +2191,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         interface PendingMcpAppCapture {
           readonly item: Extract<CodexDynamicToolItem, { readonly type: "mcpToolCall" }>;
-          readonly fiber: Fiber.Fiber<void>;
+          readonly fiber: Fiber.Fiber<void, OwnedEvents.OwnedEventDrainUnknown>;
         }
         const pendingMcpAppCaptures = yield* Ref.make(
           new Map<string, ReadonlyMap<string, PendingMcpAppCapture>>(),
@@ -2929,7 +3089,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                       : Effect.void,
                   ),
                   Effect.ignore,
-                  Effect.forkIn(scope),
+                  forkOwned(scope),
                 );
             }
           });
@@ -3199,6 +3359,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           { turnId: string; nativeItemId: string; stream: "summary" | "content"; index: number }
         >();
         const reasoningDeltas = yield* makeProviderTextDeltaCoalescer({
+          ...(owned ? { forkFlush: (work: Effect.Effect<void>) => forkProduced(work, scope) } : {}),
           flushIntervalMs: CODEX_ASSISTANT_DELTA_FLUSH_INTERVAL_MS,
           emit:
             /* Provider events include streaming deltas; avoid a span for each update. */
@@ -3285,6 +3446,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         });
 
         const agentMessageDeltas = yield* makeProviderTextDeltaCoalescer({
+          ...(owned ? { forkFlush: (work: Effect.Effect<void>) => forkProduced(work, scope) } : {}),
           flushIntervalMs: CODEX_ASSISTANT_DELTA_FLUSH_INTERVAL_MS,
           emit:
             /* Provider events include streaming deltas; avoid a span for each update. */
@@ -3670,7 +3832,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           const started = yield* Deferred.make<void>();
           const fiber = yield* Deferred.await(started).pipe(
             Effect.andThen(captureMcpAppItem(context, nativeTurnId, item, resourceUri)),
-            Effect.forkIn(scope, { startImmediately: true }),
+            forkOwned(scope, { startImmediately: true }),
           );
           yield* Ref.update(pendingMcpAppCaptures, (current) => {
             const updated = new Map(current);
@@ -3860,6 +4022,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         });
 
         const planDeltas = yield* makeProviderTextDeltaCoalescer({
+          ...(owned ? { forkFlush: (work: Effect.Effect<void>) => forkProduced(work, scope) } : {}),
           flushIntervalMs: CODEX_PLAN_DELTA_FLUSH_INTERVAL_MS,
           emit:
             /* Provider events include streaming deltas; avoid a span for each update. */
@@ -4412,7 +4575,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   Effect.catch((cause) =>
                     Effect.logWarning("orchestration-v2.codex-goal-turn-stop-failed", { cause }),
                   ),
-                  Effect.forkIn(scope),
+                  forkOwned(scope),
                 );
               return;
             }
@@ -4740,7 +4903,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (payload.item.type === "contextCompaction")
               // Fork requests off the notification reader so it can read their responses.
               yield* restoreAdditionalContext(payload.threadId).pipe(
-                Effect.forkIn(scope, { startImmediately: true }),
+                forkOwned(scope, { startImmediately: true }),
               );
             if (
               (payload.item.type === "subAgentActivity" ||
@@ -5690,7 +5853,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   turnTerminalizationPermit.withPermits(1)(releaseGoalHold(nativeThreadId, event)),
                 ),
                 // The grace window starts when the turn completes, not when the fiber is scheduled.
-                Effect.forkIn(scope, { startImmediately: true }),
+                forkOwned(scope, { startImmediately: true }),
               );
               return;
             }
@@ -6529,6 +6692,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         };
 
         const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
+          ...(owned ? { ownedEventConsumer: owned.consumer } : {}),
           instanceId: adapterOptions.instanceId,
           driver: CODEX_PROVIDER,
           providerSessionId: input.providerSessionId,
@@ -7477,7 +7641,110 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ),
           ),
         };
-        return runtime;
+        let ownedAdmissionClosed = false;
+        const wrapOwnedControl =
+          <A, B>(
+            operation: (value: A) => Effect.Effect<B, ProviderAdapter.ProviderAdapterV2Error>,
+          ) =>
+          (value: A) =>
+            Effect.suspend(() => {
+              if (ownedAdmissionClosed)
+                return Effect.fail(
+                  new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: CODEX_PROVIDER,
+                    detail: "Owned runtime input is closed",
+                  }),
+                );
+              return produce(operation(value)).pipe(
+                Effect.mapError((error) =>
+                  error._tag === "OwnedEventDrainUnknown"
+                    ? new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: CODEX_PROVIDER,
+                        detail: error.reason,
+                        payload: error,
+                      })
+                    : error,
+                ),
+              );
+            });
+        const exposed: ProviderAdapter.ProviderAdapterV2SessionRuntime = owned
+          ? {
+              ...runtime,
+              ensureThread: wrapOwnedControl(runtime.ensureThread),
+              resumeThread: wrapOwnedControl(runtime.resumeThread),
+              startTurn: wrapOwnedControl(runtime.startTurn),
+              steerTurn: wrapOwnedControl(runtime.steerTurn),
+              interruptTurn: wrapOwnedControl(runtime.interruptTurn),
+              respondToRuntimeRequest: wrapOwnedControl(runtime.respondToRuntimeRequest),
+              readThreadSnapshot: wrapOwnedControl(runtime.readThreadSnapshot),
+              rollbackThread: wrapOwnedControl(runtime.rollbackThread),
+              forkThread: wrapOwnedControl(runtime.forkThread),
+              ...(runtime.injectHistory
+                ? { injectHistory: wrapOwnedControl(runtime.injectHistory) }
+                : {}),
+              ...(runtime.compactThread
+                ? { compactThread: wrapOwnedControl(runtime.compactThread) }
+                : {}),
+              ...(runtime.stopTask ? { stopTask: wrapOwnedControl(runtime.stopTask) } : {}),
+              ...(runtime.awaitBackgroundTasks
+                ? { awaitBackgroundTasks: wrapOwnedControl(runtime.awaitBackgroundTasks) }
+                : {}),
+              ...(runtime.stopSubagent
+                ? { stopSubagent: wrapOwnedControl(runtime.stopSubagent) }
+                : {}),
+              ...(runtime.unloadThread
+                ? { unloadThread: wrapOwnedControl(runtime.unloadThread) }
+                : {}),
+              ...(runtime.uploadFeedback
+                ? { uploadFeedback: wrapOwnedControl(runtime.uploadFeedback) }
+                : {}),
+              ...(runtime.mcpApps
+                ? {
+                    mcpApps: {
+                      listTools: wrapOwnedControl(runtime.mcpApps.listTools),
+                      callTool: wrapOwnedControl(runtime.mcpApps.callTool),
+                      readResource: wrapOwnedControl(runtime.mcpApps.readResource),
+                    },
+                  }
+                : {}),
+            }
+          : runtime;
+        if (owned)
+          ownedEventLifecycles.set(exposed, {
+            generation: owned.generation,
+            transport: owned.transport,
+            seal: Effect.fn("CodexAdapterV2.sealOwnedEventPrefix")(
+              function* (timeout: Duration.Input) {
+                if (yield* CurrentCodexProducer)
+                  return yield* new OwnedEvents.OwnedEventDrainUnknown({
+                    reason: "joinWhileProducing",
+                  });
+                ownedAdmissionClosed = true;
+                yield* owned.transport.input.finishInput;
+                yield* owned.transport.input.providerInput(timeout);
+                yield* owned.transport.childExit(timeout);
+                yield* owned.transport.input.inputEOF(timeout);
+                yield* owned.transport.input.parserDispatch(timeout);
+                yield* owned.transport.stderrEOF(timeout);
+                yield* reasoningDeltas.flushAndJoin;
+                yield* agentMessageDeltas.flushAndJoin;
+                yield* planDeltas.flushAndJoin;
+                yield* owned.broker.closeRoots(owned.generation);
+                return yield* owned.broker.seal(owned.generation, owned.transport.transport, {
+                  timeout,
+                });
+              },
+              (effect) =>
+                effect.pipe(
+                  Effect.onExit((exit) =>
+                    Exit.isFailure(exit)
+                      ? owned.broker.invalidate(owned.generation).pipe(Effect.ignore)
+                      : Effect.void,
+                  ),
+                ),
+            ),
+          });
+        return exposed;
       },
       (effect, input) =>
         effect.pipe(

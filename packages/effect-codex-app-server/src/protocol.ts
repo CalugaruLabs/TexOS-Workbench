@@ -1,5 +1,6 @@
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
+import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
@@ -47,14 +48,29 @@ export interface CodexAppServerPatchedProtocolOptions {
   readonly logger?: (event: CodexAppServerProtocolLogEvent) => Effect.Effect<void, never>;
   readonly onNotification?: (
     notification: CodexAppServerIncomingNotification,
-  ) => Effect.Effect<void, never>;
+  ) => Effect.Effect<void, CodexError.CodexAppServerError>;
   readonly onRequest?: (
     request: CodexAppServerIncomingRequest,
   ) => Effect.Effect<unknown, CodexError.CodexAppServerError>;
   readonly onTermination?: (error: CodexError.CodexAppServerError) => Effect.Effect<void, never>;
+  readonly observeOwnedInput?: boolean;
+}
+
+export interface CodexOwnedInputObservation {
+  readonly finishInput: Effect.Effect<void>;
+  readonly providerInput: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<void, CodexError.CodexAppServerError>;
+  readonly inputEOF: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<void, CodexError.CodexAppServerError>;
+  readonly parserDispatch: (
+    timeout: Duration.Input,
+  ) => Effect.Effect<void, CodexError.CodexAppServerError>;
 }
 
 export interface CodexAppServerPatchedProtocol {
+  readonly ownedInput?: CodexOwnedInputObservation;
   readonly incomingNotifications: Stream.Stream<CodexAppServerIncomingNotification>;
   readonly incomingRequests: Stream.Stream<CodexAppServerIncomingRequest>;
   readonly request: (
@@ -176,6 +192,57 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     const terminationFailure = yield* Ref.make(Option.none<CodexError.CodexAppServerError>());
     const terminationSignal = yield* Deferred.make<void>();
     const activeRequestHandlers = yield* Ref.make(0);
+    const owned =
+      options.observeOwnedInput === true
+        ? {
+            eof: Deferred.makeUnsafe<void, CodexError.CodexAppServerError>(),
+            handlersDone: Deferred.makeUnsafe<void, CodexError.CodexAppServerError>(),
+            parsed: Deferred.makeUnsafe<void, CodexError.CodexAppServerError>(),
+            written: Deferred.makeUnsafe<void, CodexError.CodexAppServerError>(),
+            failure: undefined as CodexError.CodexAppServerError | undefined,
+            handlers: 0,
+            readerFinished: false,
+          }
+        : undefined;
+    const failOwned = (error: CodexError.CodexAppServerError) => {
+      if (owned) {
+        owned.failure ??= error;
+        for (const deferred of [owned.handlersDone, owned.parsed])
+          Deferred.doneUnsafe(deferred, Effect.fail(owned.failure));
+      }
+      return owned?.failure ?? error;
+    };
+    const ownedError = (stage: string, cause: unknown) =>
+      failOwned(
+        new CodexError.CodexAppServerTransportError({
+          operation: "read-input-stream",
+          cause: { stage, cause },
+        }),
+      );
+    const awaitOwned = (
+      deferred: Deferred.Deferred<void, CodexError.CodexAppServerError>,
+      timeout: Duration.Input,
+    ) =>
+      Deferred.await(deferred).pipe(
+        Effect.timeoutOrElse({
+          duration: timeout,
+          orElse: () =>
+            Effect.suspend(() => {
+              const error = ownedError(
+                "owned-input-deadline",
+                "Unobserved input/parser completion",
+              );
+              Deferred.doneUnsafe(deferred, Effect.fail(error));
+              return Effect.fail(error);
+            }),
+        }),
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            const error = ownedError("owned-input-interrupted", "Observation interrupted");
+            Deferred.doneUnsafe(deferred, Effect.fail(error));
+          }),
+        ),
+      );
 
     const logProtocol = (event: CodexAppServerProtocolLogEvent) => {
       if (event.direction === "incoming" && !options.logIncoming) {
@@ -322,7 +389,12 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
                 );
               }
 
-              return handler(request).pipe(
+              const work = handler(request).pipe(
+                Effect.tapError((error) =>
+                  Effect.sync(() => {
+                    failOwned(error);
+                  }),
+                ),
                 Effect.matchEffect({
                   onFailure: (error) =>
                     respondError(
@@ -343,8 +415,26 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
                     Effect.asVoid,
                   ),
                 ),
-                Effect.forkIn(requestHandlerScope, { startImmediately: true }),
-                Effect.asVoid,
+              );
+              if (!owned)
+                return work.pipe(
+                  Effect.forkIn(requestHandlerScope, { startImmediately: true }),
+                  Effect.asVoid,
+                );
+              return Effect.uninterruptible(
+                Effect.gen(function* () {
+                  owned.handlers++;
+                  const fiber = yield* work.pipe(
+                    Effect.interruptible,
+                    Effect.forkIn(requestHandlerScope),
+                  );
+                  fiber.addObserver((exit) => {
+                    owned.handlers--;
+                    if (Exit.isFailure(exit)) ownedError("owned-handler-failed", exit.cause);
+                    if (owned.readerFinished && owned.handlers === 0)
+                      Deferred.doneUnsafe(owned.handlersDone, Effect.void);
+                  });
+                }),
               );
             }),
           );
@@ -403,9 +493,35 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       );
     };
 
-    yield* options.stdio.stdin.pipe(
-      Stream.interruptWhen(Deferred.await(terminationSignal)),
-      Stream.decodeText(),
+    const inputText = owned
+      ? Stream.unwrap(
+          Effect.sync(() => {
+            const decoder = new TextDecoder("utf-8", { fatal: true });
+            const decode = (chunk?: Uint8Array) =>
+              Effect.try({
+                try: () =>
+                  chunk === undefined ? decoder.decode() : decoder.decode(chunk, { stream: true }),
+                catch: (cause) => ownedError("owned-input-utf8", cause),
+              });
+            return options.stdio.stdin.pipe(
+              Stream.onExit((exit) =>
+                Exit.isSuccess(exit)
+                  ? Deferred.succeed(owned.eof, undefined)
+                  : Effect.sync(() => {
+                      const error = ownedError("owned-input-failed", exit.cause);
+                      Deferred.doneUnsafe(owned.eof, Effect.fail(error));
+                    }),
+              ),
+              Stream.mapEffect(decode),
+              Stream.concat(Stream.fromEffect(decode())),
+            );
+          }),
+        )
+      : options.stdio.stdin.pipe(
+          Stream.interruptWhen(Deferred.await(terminationSignal)),
+          Stream.decodeText(),
+        );
+    yield* inputText.pipe(
       Stream.runForEach(
         Effect.fnUntraced(function* (chunk) {
           let start = 0;
@@ -434,7 +550,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       Effect.matchEffect({
         onFailure: (error) =>
           handleTermination(() =>
-            Effect.succeed(normalizeIncomingError(error, "read-input-stream")),
+            Effect.succeed(failOwned(normalizeIncomingError(error, "read-input-stream"))),
           ),
         onSuccess: () =>
           Effect.sync(() => {
@@ -444,9 +560,15 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
           }).pipe(
             Effect.flatMap(handleLine),
             Effect.matchEffect({
-              onFailure: (error) => handleTermination(() => Effect.succeed(error)),
-              onSuccess: () =>
-                handleTermination(() => {
+              onFailure: (error) => handleTermination(() => Effect.succeed(failOwned(error))),
+              onSuccess: Effect.fn("CodexAppServerProtocol.settleOwnedReader")(function* () {
+                if (owned) {
+                  owned.readerFinished = true;
+                  if (owned.handlers === 0) Deferred.doneUnsafe(owned.handlersDone, Effect.void);
+                  yield* Deferred.await(owned.handlersDone);
+                  if (owned.failure) return yield* owned.failure;
+                }
+                yield* handleTermination(() => {
                   const ended = new CodexError.CodexAppServerInputStreamEndedError({});
                   // Node ends stdout before it reports the exit of a crashed process, so
                   // wait briefly for the exit status. stdout can also close while the
@@ -459,14 +581,37 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
                           orElse: () => Effect.succeed(ended),
                         }),
                       );
-                }),
+                });
+                if (owned) Deferred.doneUnsafe(owned.parsed, Effect.void);
+              }),
             }),
           ),
       }),
+      Effect.onExit((exit) =>
+        Exit.isFailure(exit)
+          ? Effect.sync(() => {
+              ownedError("owned-reader-interrupted", exit.cause);
+            })
+          : Effect.void,
+      ),
       Effect.forkScoped,
     );
 
-    yield* Stream.fromQueue(outgoing).pipe(Stream.run(options.stdio.stdout()), Effect.forkScoped);
+    yield* Stream.fromQueue(outgoing).pipe(
+      Stream.run(options.stdio.stdout()),
+      Effect.onExit((exit) =>
+        Effect.sync(() => {
+          if (!owned) return;
+          if (Exit.isFailure(exit))
+            Deferred.doneUnsafe(
+              owned.written,
+              Effect.fail(ownedError("owned-provider-input-failed", exit.cause)),
+            );
+          else Deferred.doneUnsafe(owned.written, Effect.void);
+        }),
+      ),
+      Effect.forkScoped,
+    );
 
     const request = Effect.fn("CodexAppServerProtocol.request")(function* (
       method: string,
@@ -497,6 +642,16 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       });
 
     return {
+      ...(owned
+        ? {
+            ownedInput: {
+              finishInput: Queue.end(outgoing).pipe(Effect.asVoid),
+              providerInput: (timeout: Duration.Input) => awaitOwned(owned.written, timeout),
+              inputEOF: (timeout: Duration.Input) => awaitOwned(owned.eof, timeout),
+              parserDispatch: (timeout: Duration.Input) => awaitOwned(owned.parsed, timeout),
+            },
+          }
+        : {}),
       incomingNotifications: Stream.fromQueue(incomingNotifications),
       incomingRequests: Stream.fromQueue(incomingRequests),
       request,

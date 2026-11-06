@@ -12,7 +12,8 @@ import {
   exact,
   identifier,
   object,
-  type ExecutionAuthorizationRequest,
+  type ExecutionNativeRequest,
+  type ExecutionObservationKey,
   type ExecutionChannelBinding,
   type ExecutionHostRequest,
   type ExecutionWireResponse,
@@ -42,7 +43,7 @@ export function executionEndpoint(control: ExecutionControl["Service"]): Private
 export class PrivateExecutionChannel {
   private readonly binding: ExecutionChannelBinding;
   private readonly endpoint: PrivateExecutionEndpoint;
-  private readonly send: (frame: ExecutionWireResponse | ExecutionAuthorizationRequest) => void;
+  private readonly send: (frame: ExecutionWireResponse | ExecutionNativeRequest) => void;
   private readonly fail: () => void;
   private readonly timeoutMs: number;
   private negotiated = false;
@@ -63,7 +64,7 @@ export class PrivateExecutionChannel {
   constructor(
     binding: ExecutionChannelBinding,
     endpoint: PrivateExecutionEndpoint,
-    send: (frame: ExecutionWireResponse | ExecutionAuthorizationRequest) => void,
+    send: (frame: ExecutionWireResponse | ExecutionNativeRequest) => void,
     fail: () => void,
     timeoutMs = 5000,
   ) {
@@ -89,7 +90,19 @@ export class PrivateExecutionChannel {
     void this.endpoint.disconnect().catch(() => {});
   }
 
-  private authorize: NativeStartAuthorizer = (params, signal) => {
+  private authorize: NativeStartAuthorizer = (params, signal) =>
+    this.nativeRequest("execution.authorizeStart", params, signal);
+
+  /** The native admission's CLI binding for one admitted key; TexOS owns the answer. */
+  readBinding(key: ExecutionObservationKey, signal: AbortSignal): Promise<unknown> {
+    return this.nativeRequest("execution.readBinding", key, signal);
+  }
+
+  private nativeRequest(
+    method: ExecutionNativeRequest["method"],
+    params: ExecutionNativeRequest["params"],
+    signal: AbortSignal,
+  ): Promise<unknown> {
     if (
       this.closed ||
       !this.negotiated ||
@@ -128,15 +141,15 @@ export class PrivateExecutionChannel {
           kind: "request",
           id,
           ...this.binding,
-          method: "execution.authorizeStart",
+          method,
           params,
-        });
+        } as ExecutionNativeRequest);
       } catch {
         expire();
         this.fail();
       }
     });
-  };
+  }
 
   receive(value: unknown) {
     if (this.closed) throw new ExecutionProtocolError("executionChannelDisconnected");

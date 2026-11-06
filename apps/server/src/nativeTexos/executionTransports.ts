@@ -17,47 +17,43 @@ export const makeManagedExecutionTransports = Effect.fn("ManagedExecutionTranspo
   function* () {
     const factory = yield* Codex.CodexAppServerClientFactory;
     const openOwned = factory.openOwned;
-    const transports: ManagedExecutionTransports = {
-      ...(openOwned
-        ? {
-            codex: {
-              open: Effect.fn("ManagedExecutionTransports.openCodex")(function* (input) {
-                const client = yield* openOwned({ ...input, observeOwnedInput: true }).pipe(
+    const transports: ManagedExecutionTransports = openOwned
+      ? {
+          codex: {
+            open: Effect.fn("ManagedExecutionTransports.openCodex")(function* (input) {
+              const client = yield* openOwned({ ...input, observeOwnedInput: true }).pipe(
+                Effect.mapError(() => new OwnedExecutionTransportError({ operation: "openCodex" })),
+              );
+              const owned = client.ownedTransport;
+              if (!owned)
+                return yield* new OwnedExecutionTransportError({
+                  operation: "ownedTransportMissing",
+                });
+              return {
+                client,
+                closeAndJoin: owned.childExit(SETTLED_OBSERVATION_TIMEOUT).pipe(
+                  Effect.flatMap((code) =>
+                    code === 0
+                      ? Effect.void
+                      : Effect.fail(new OwnedExecutionTransportError({ operation: "childExit" })),
+                  ),
                   Effect.mapError(
-                    () => new OwnedExecutionTransportError({ operation: "openCodex" }),
+                    () => new OwnedExecutionTransportError({ operation: "childExit" }),
                   ),
-                );
-                const owned = client.ownedTransport;
-                if (!owned)
-                  return yield* new OwnedExecutionTransportError({
-                    operation: "ownedTransportMissing",
-                  });
-                return {
-                  client,
-                  closeAndJoin: owned.childExit(SETTLED_OBSERVATION_TIMEOUT).pipe(
-                    Effect.flatMap((code) =>
-                      code === 0
-                        ? Effect.void
-                        : Effect.fail(new OwnedExecutionTransportError({ operation: "childExit" })),
-                    ),
+                ),
+                transportAndParserDrain: owned.input
+                  .parserDispatch(SETTLED_OBSERVATION_TIMEOUT)
+                  .pipe(
+                    Effect.andThen(owned.stderrEOF(SETTLED_OBSERVATION_TIMEOUT)),
                     Effect.mapError(
-                      () => new OwnedExecutionTransportError({ operation: "childExit" }),
+                      () => new OwnedExecutionTransportError({ operation: "parserDrain" }),
                     ),
                   ),
-                  transportAndParserDrain: owned.input
-                    .parserDispatch(SETTLED_OBSERVATION_TIMEOUT)
-                    .pipe(
-                      Effect.andThen(owned.stderrEOF(SETTLED_OBSERVATION_TIMEOUT)),
-                      Effect.mapError(
-                        () => new OwnedExecutionTransportError({ operation: "parserDrain" }),
-                      ),
-                    ),
-                };
-              }),
-            },
-          }
-        : {}),
-    };
+              };
+            }),
+          },
+        }
+      : {};
     return transports;
   },
 );

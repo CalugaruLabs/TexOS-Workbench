@@ -3,6 +3,7 @@ import type {
   PersonalAgentEvent,
   PersonalAgentHello,
   PersonalAgentResponse,
+  PersonalAgentSnapshot,
 } from "@t3tools/contracts";
 // @effect-diagnostics nodeBuiltinImport:off - Private inherited Node descriptors and opaque UUIDs; no provider subprocess.
 import * as NodeTimers from "node:timers";
@@ -24,6 +25,9 @@ import {
   isPersonalAgentRunDetail,
   isPersonalAgentExecutionMethod,
   personalAgentExecutionAvailable,
+  personalAgentCanonicalFreshness,
+  withoutPersonalAgentCanonicalTasks,
+  type PersonalAgentCanonicalCursor,
 } from "@t3tools/shared/personalAgents";
 
 export type NativeProvider = "codex" | "claudeCode";
@@ -89,6 +93,10 @@ export class NativeBridge {
   private agentRevoked = false;
   private agentExecutionBlocked = false;
   private agentRevision = 0;
+  private agentCanonicalCursor: PersonalAgentCanonicalCursor | undefined;
+  private agentCanonicalAwaitingRead = false;
+  private agentSnapshotReadOrdinal = 0;
+  private agentProjectionEpoch = 0;
   private pending = new Map<
     string,
     {
@@ -242,7 +250,45 @@ export class NativeBridge {
     this.agentRevoked ||= frame.snapshot.revoked;
     this.agentExecutionBlocked ||= !personalAgentExecutionAvailable(frame.snapshot);
     this.agentRevision = Math.max(this.agentRevision, frame.snapshot.revision);
-    for (const listener of this.agentListeners) listener(frame as unknown as PersonalAgentEvent);
+    const snapshot = this.presentCanonicalTasks(frame.snapshot, false);
+    const event = { ...frame, snapshot } as unknown as PersonalAgentEvent;
+    for (const listener of this.agentListeners) listener(event);
+  }
+
+  private presentCanonicalTasks(snapshot: PersonalAgentSnapshot, freshRead: boolean) {
+    const decision = personalAgentCanonicalFreshness(
+      snapshot.canonicalTasks,
+      this.agentCanonicalCursor,
+      freshRead,
+    );
+    if (
+      !freshRead &&
+      (decision === "readRequired" ||
+        (decision === "absent" && this.agentCanonicalCursor !== undefined) ||
+        snapshot.revoked)
+    )
+      this.agentProjectionEpoch += 1;
+    if (
+      decision === "readRequired" ||
+      (decision === "absent" && this.agentCanonicalCursor !== undefined && !freshRead)
+    )
+      this.agentCanonicalAwaitingRead = true;
+    if (
+      snapshot.revoked ||
+      this.agentRevoked ||
+      decision === "stale" ||
+      decision === "readRequired" ||
+      (this.agentCanonicalAwaitingRead && !freshRead)
+    )
+      return withoutPersonalAgentCanonicalTasks(snapshot);
+    if (freshRead) this.agentCanonicalAwaitingRead = false;
+    if (freshRead && decision === "absent") this.agentCanonicalCursor = undefined;
+    if (decision === "accept" && snapshot.canonicalTasks)
+      this.agentCanonicalCursor = {
+        generation: snapshot.canonicalTasks.projectionGeneration,
+        revision: snapshot.canonicalTasks.revision,
+      };
+    return snapshot;
   }
   private receive(chunk: Buffer) {
     if (this.failure) return;
@@ -423,7 +469,10 @@ export class NativeBridge {
             "Agent execution is not enabled on this connection. Saved agents and history remain available.",
         },
       };
-    const response = await this.requestAgents(command);
+    const readOrdinal =
+      command.method === "agents.snapshot" ? ++this.agentSnapshotReadOrdinal : undefined;
+    const projectionEpoch = this.agentProjectionEpoch;
+    let response = await this.requestAgents(command);
     if (response.ok && command.method === "agents.hello") {
       if (this.failure) throw this.failure;
       if (
@@ -475,6 +524,19 @@ export class NativeBridge {
         this.agentRevoked ||= snapshot.revoked;
         this.agentExecutionBlocked ||= !personalAgentExecutionAvailable(snapshot);
         this.agentRevision = Math.max(this.agentRevision, snapshot.revision);
+        const staleRead =
+          projectionEpoch !== this.agentProjectionEpoch ||
+          (readOrdinal !== undefined && readOrdinal !== this.agentSnapshotReadOrdinal);
+        const composed = staleRead
+          ? withoutPersonalAgentCanonicalTasks(snapshot)
+          : this.presentCanonicalTasks(snapshot, readOrdinal !== undefined);
+        response = {
+          ...response,
+          result:
+            command.method === "agents.snapshot"
+              ? composed
+              : { ...(result as Record<string, unknown>), snapshot: composed },
+        };
       }
     } else if (response.ok && command.method === "agents.artifact") {
       const result = response.result;

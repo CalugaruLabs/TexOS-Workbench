@@ -1,0 +1,114 @@
+{
+  "revision": 1,
+  "runtimeID": "r",
+  "mode": "fake",
+  "revoked": false,
+  "agents": [
+    {
+      "id": "builder",
+      "name": "Builder",
+      "provider": "codex",
+      "instructions": "Synthetic fixture",
+      "projectID": "project",
+      "conversationID": "conversation",
+      "createdAt": "2026-11-03T00:00:00Z"
+    }
+  ],
+  "runs": [
+    {
+      "id": "legacy-run",
+      "agentID": "builder",
+      "taskID": "legacy-task",
+      "conversationID": "conversation",
+      "status": "completed",
+      "text": "Synthetic earlier attempt",
+      "createdAt": "2026-11-03T00:00:00Z",
+      "updatedAt": "2026-11-03T00:00:00Z"
+    }
+  ],
+  "history": {
+    "bounded": true,
+    "totalRuns": 1,
+    "totalMessages": 0,
+    "runLimit": 100,
+    "messageLimit": 100,
+    "textLimit": 4096
+  },
+  "messages": [],
+  "attention": [],
+  "artifacts": [],
+  "canonicalTasks": {
+    "schemaVersion": 1,
+    "projectionGeneration": "projection-A",
+    "revision": 1,
+    "helperRuntimeID": "r",
+    "helperRevision": 1,
+    "checkedAtMs": 1800000000000,
+    "state": "ready",
+    "items": [
+      {
+        "agentID": "builder",
+        "conversationID": "conversation",
+        "nativeProjectID": "project",
+        "nativeTaskID": "canonical-task",
+        "title": "Prepare the synthetic brief",
+        "displayStatus": "working",
+        "runs": [
+          {
+            "nativeCommandID": "command-codex",
+            "nativeRunID": "run-codex",
+            "parentVisibility": "root",
+            "providerID": "codex",
+            "commandState": "attemptFinished",
+            "resultReview": "unverified",
+            "attemptObservation": {
+              "phase": "attemptEnded",
+              "sequence": 2,
+              "observedAtMs": 1800000000000
+            },
+            "executionBinding": {
+              "runtimeID": "execution-runtime",
+              "runtimeRunID": "executor-codex",
+              "channelPresence": "lastRecorded"
+            },
+            "providerAttempt": {
+              "threadID": "codex-thread",
+              "sessionID": "codex-session",
+              "turnID": "codex-turn"
+            },
+            "reportedChildRunID": "reported-codex-child"
+          },
+          {
+            "nativeCommandID": "command-claude",
+            "nativeRunID": "run-claude",
+            "nativeParentRunID": "run-codex",
+            "parentVisibility": "included",
+            "providerID": "claudeCode",
+            "commandState": "verified",
+            "resultReview": "reviewed",
+            "attemptObservation": {
+              "phase": "attemptEnded",
+              "sequence": 2,
+              "observedAtMs": 1800000000000
+            },
+            "executionBinding": {
+              "runtimeID": "execution-runtime",
+              "runtimeRunID": "executor-claude",
+              "providerSessionID": "claude-session",
+              "channelPresence": "lastRecorded"
+            },
+            "reportedChildRunID": "reported-claude-child"
+          }
+        ]
+      }
+    ],
+    "history": {
+      "bounded": true,
+      "taskLimit": 20,
+      "runLimit": 40,
+      "returnedTasks": 1,
+      "returnedRuns": 2,
+      "hasMore": false
+    }
+  }
+}

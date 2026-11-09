@@ -952,7 +952,7 @@ export const TEXOS_THEME: ThemeDefinition = {
     accentSurface: "#3a3a3a",
     accentSurfaceForeground: "#ededed",
     messageSurface: "#3a3a3a",
-    messageForeground: "#ededed",
+    messageForeground: "#e5e5e5",
     messageAction: "#ededed",
     messageActionForeground: "#121212",
     messageActionHover: "#ffffff",

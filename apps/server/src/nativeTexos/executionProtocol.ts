@@ -2,6 +2,8 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 
+import { isTexosMissionId } from "@t3tools/shared/texosMission";
+
 export const EXECUTION_NAMESPACE = "texos.execution";
 export const EXECUTION_CAPABILITY = "texos.execution.controlled-codex.v2";
 export const MANAGED_EXECUTION_CAPABILITY = "texos.execution.managed-cli.v2";
@@ -34,6 +36,7 @@ export interface ExecutionConfiguration {
 export interface ExecutionIntent {
   readonly commandID: string;
   readonly canonicalRunID: string;
+  readonly canonicalTaskID: string;
   readonly canonicalAttemptID: string;
   readonly workerRequestID: string;
   readonly scope: ExecutionScope;
@@ -211,6 +214,7 @@ export function decodeExecutionIntent(value: unknown): ExecutionIntent {
   const intent = exact(value, [
     "commandID",
     "canonicalRunID",
+    "canonicalTaskID",
     "canonicalAttemptID",
     "workerRequestID",
     "scope",
@@ -222,6 +226,14 @@ export function decodeExecutionIntent(value: unknown): ExecutionIntent {
   uuid(intent.commandID);
   for (const key of ["canonicalRunID", "canonicalAttemptID", "workerRequestID"])
     identifier(intent[key]);
+  identifier(intent.canonicalTaskID);
+  // The pair keys the T3 thread, so both stay inside the mission identity limits.
+  if (
+    !isTexosMissionId(intent.canonicalTaskID) ||
+    !isTexosMissionId(String(intent.canonicalAttemptID))
+  ) {
+    throw new ExecutionProtocolError("invalidExecutionIdentity");
+  }
   const scope = exact(intent.scope, [
     "authorityID",
     "installationID",

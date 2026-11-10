@@ -5,6 +5,8 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { texosMissionThreadId } from "@t3tools/shared/texosMission";
+
 import { exact, executionEnvelope, identifier, type ExecutionIntent } from "./executionProtocol.ts";
 
 export type ExecutionPhase =
@@ -200,7 +202,14 @@ const make = Effect.gen(function* () {
           catch: () => new ExecutionReceiptError({ code: "invalidExecutionIntent" }),
         });
         const childID = yield* crypto.randomUUIDv4();
-        const t3ThreadID = yield* crypto.randomUUIDv4();
+        const t3ThreadID = yield* Effect.tryPromise({
+          try: () =>
+            texosMissionThreadId(
+              envelope.intent.canonicalTaskID,
+              envelope.intent.canonicalAttemptID,
+            ),
+          catch: () => new ExecutionReceiptError({ code: "invalidExecutionIntent" }),
+        });
         const t3ProviderSessionID = yield* crypto.randomUUIDv4();
         return yield* sql.withTransaction(
           Effect.gen(function* () {
@@ -212,6 +221,16 @@ const make = Effect.gen(function* () {
             if (previous) return { created: false, receipt: previous };
             if (yield* hasUnresolved)
               return yield* new ExecutionReceiptError({ code: "executionCapacityOccupied" });
+            // One admission per TexOS attempt: a retry is a new attempt and gets its own thread.
+            const sameAttempt = yield* sql<{ readonly total: number }>`
+          SELECT COUNT(*) AS total FROM native_execution_receipts WHERE t3_thread_id = ${t3ThreadID}
+        `.pipe(
+              Effect.mapError(
+                () => new ExecutionReceiptError({ code: "executionStorageUnavailable" }),
+              ),
+            );
+            if ((sameAttempt[0]?.total ?? 1) !== 0)
+              return yield* new ExecutionReceiptError({ code: "executionAttemptAlreadyAdmitted" });
             const inserted = yield* sql<{ readonly command_id: string }>`
           INSERT INTO native_execution_receipts
             (command_id, canonical_run_id, authority_id, envelope_digest, envelope_json,

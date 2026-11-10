@@ -33,11 +33,22 @@ describe("private execution envelope", () => {
     expect(envelope.digest).toBe(unicodeCanonicalFixture.digest);
   });
 
+  it("requires a task identity and keeps the mission pair inside 128 bytes", () => {
+    const intent = syntheticIntent();
+    const { canonicalTaskID: _task, ...withoutTask } = intent;
+    expect(() => executionEnvelope(withoutTask)).toThrow();
+    expect(() => executionEnvelope({ ...intent, canonicalTaskID: "t".repeat(129) })).toThrow();
+    expect(() => executionEnvelope({ ...intent, canonicalAttemptID: "a".repeat(129) })).toThrow();
+    expect(
+      executionEnvelope({ ...intent, canonicalTaskID: "t".repeat(128) }).intent,
+    ).toHaveProperty("canonicalTaskID", "t".repeat(128));
+  });
+
   it("hashes canonical UTF-8 bytes, rejects unowned fields, and retains an immutable copy", () => {
     const intent = syntheticIntent();
     const envelope = executionEnvelope(intent);
     expect(envelope.digest).toBe(
-      "37faebb6baac0ba79cbce075327fb1a80ed4e54409130664be70a669ece81778",
+      "ddcdf5ab020289a4174bf8d7bae9854677667e8f2f5488778b0742419240e6ec",
     );
     expect(executionEnvelope(JSON.parse(JSON.stringify(intent))).digest).toBe(envelope.digest);
     expect(executionEnvelope({ ...intent, input: "changed" }).digest).not.toBe(envelope.digest);

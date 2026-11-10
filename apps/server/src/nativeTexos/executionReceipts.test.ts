@@ -13,6 +13,7 @@ import Migration from "../persistence/Migrations/070_NativeExecutionReceipts.ts"
 import * as Receipts from "./executionReceipts.ts";
 import { executionEnvelope } from "./executionProtocol.ts";
 import { syntheticIntent } from "./execution.testkit.ts";
+import { texosMissionThreadId } from "@t3tools/shared/texosMission";
 
 const database = Layer.mergeAll(
   NodeSqliteClient.layer({ filename: ":memory:" }),
@@ -225,5 +226,37 @@ describe("native execution durable receipts", () => {
           ),
         );
       }).pipe(Effect.provide(receiptsLayer)),
+  );
+
+  it.effect("each TexOS attempt keys exactly one derived T3 thread", () =>
+    Effect.gen(function* () {
+      const store = yield* Receipts.ExecutionReceipts;
+      const sql = yield* SqlClient.SqlClient;
+      const intent = syntheticIntent();
+      const first = yield* store.admit(intent);
+      assert.equal(
+        first.receipt.t3ThreadID,
+        yield* Effect.promise(() => texosMissionThreadId("canonical-task", "canonical-attempt")),
+      );
+      yield* sql`UPDATE native_execution_receipts SET phase = 'stopped', drained = 1`;
+      const reused = yield* Effect.flip(
+        store.admit({
+          ...intent,
+          commandID: "00000000-0000-4000-8000-000000000002",
+          canonicalRunID: "canonical-run-2",
+        }),
+      );
+      assert.equal(reused.code, "executionAttemptAlreadyAdmitted");
+      const retry = yield* store.admit({
+        ...intent,
+        commandID: "00000000-0000-4000-8000-000000000003",
+        canonicalRunID: "canonical-run-3",
+        canonicalAttemptID: "canonical-attempt-2",
+      });
+      assert.equal(
+        retry.receipt.t3ThreadID,
+        yield* Effect.promise(() => texosMissionThreadId("canonical-task", "canonical-attempt-2")),
+      );
+    }).pipe(Effect.provide(receiptsLayer)),
   );
 });

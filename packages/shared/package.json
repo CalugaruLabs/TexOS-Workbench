@@ -506,6 +506,10 @@
     "./personalAgents": {
       "types": "./src/personalAgents.ts",
       "import": "./src/personalAgents.ts"
+    },
+    "./texosMission": {
+      "types": "./src/texosMission.ts",
+      "import": "./src/texosMission.ts"
     }
   },
   "scripts": {

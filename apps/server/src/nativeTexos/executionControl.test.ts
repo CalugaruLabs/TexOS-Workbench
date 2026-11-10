@@ -188,6 +188,7 @@ describe("private admitted execution", () => {
             ...intent,
             commandID: NodeCrypto.randomUUID(),
             canonicalRunID: NodeCrypto.randomUUID(),
+            canonicalAttemptID: NodeCrypto.randomUUID(),
           };
           const native = authorizer(request, now, patch);
           const hello = yield* control.handle(
@@ -231,6 +232,7 @@ describe("private admitted execution", () => {
         ...original,
         commandID: NodeCrypto.randomUUID(),
         canonicalRunID: NodeCrypto.randomUUID(),
+        canonicalAttemptID: NodeCrypto.randomUUID(),
         worktree: { ...original.worktree, inode: String(BigInt(original.worktree.inode) + 1n) },
       };
       yield* control.handle(
@@ -329,6 +331,7 @@ describe("private admitted execution", () => {
         ...intent,
         commandID: NodeCrypto.randomUUID(),
         canonicalRunID: NodeCrypto.randomUUID(),
+        canonicalAttemptID: NodeCrypto.randomUUID(),
       };
       assert.isTrue(
         Exit.isFailure(

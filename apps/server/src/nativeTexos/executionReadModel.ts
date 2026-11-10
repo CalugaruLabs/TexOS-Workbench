@@ -79,7 +79,7 @@ const bestEffort =
       ),
     );
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const eventSink = yield* EventSink.EventSinkV2;
   const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
   const checkpoints = yield* CheckpointService.CheckpointServiceV2;

@@ -43,7 +43,7 @@ const git = GitVcsDriver.layer.pipe(
   Layer.provideMerge(NodeServices.layer),
 );
 
-const makeLayer = (sink: Layer.Layer<EventSink.EventSinkV2>, captured: Array<RunId>) => {
+const makeLayer = <E>(sink: Layer.Layer<EventSink.EventSinkV2, E>, captured: Array<RunId>) => {
   const checkpoints = Layer.mock(CheckpointService.CheckpointServiceV2)({
     prepareRootRunScope: (input) =>
       Effect.succeed({

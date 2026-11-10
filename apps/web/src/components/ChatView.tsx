@@ -3357,7 +3357,11 @@ export default function ChatView(props: ChatViewProps) {
                 paintOnly={paintOnlyDisplayedTimeline}
                 announceTurnStatus={!isProviderSubagent}
                 onOpenTurnDiff={
-                  paintOnlyDisplayedTimeline ? noopHeldTurnDiff : onOpenTurnDiffStable
+                  embedded
+                    ? undefined
+                    : paintOnlyDisplayedTimeline
+                      ? noopHeldTurnDiff
+                      : onOpenTurnDiffStable
                 }
                 onOpenThread={onOpenRelatedThreadStable}
                 parentThreadLink={paintOnlyDisplayedTimeline ? null : parentThreadLink}

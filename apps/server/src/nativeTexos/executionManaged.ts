@@ -43,6 +43,7 @@ import {
 import { ExecutionControlError, type ControlledExecutionAttempt } from "./executionControl.ts";
 import type * as Receipts from "./executionReceipts.ts";
 import type { ManagedExecutionObservation } from "./executionProtocol.ts";
+import { ManagedRunReadModel } from "./executionReadModel.ts";
 import { validateExecutionWorktree } from "./executionWorktree.ts";
 
 export class OwnedExecutionTransportError extends Schema.TaggedError<OwnedExecutionTransportError>()(
@@ -422,11 +423,57 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                 nativeTurnID?: string;
               } = { providerThreadID: providerThread.id, nativeThreadID };
               yield* recordMappings(mappings);
+              const now = yield* DateTime.now;
+              const appThread: OrchestrationV2AppThread = {
+                id: threadId,
+                projectId: ProjectId.make(intent.scope.projectID),
+                title: intent.input.split("\n")[0]!.trim().slice(0, 80).trim() || "TexOS Mission",
+                createdBy: "user",
+                creationSource: "web",
+                providerInstanceId: instanceId,
+                modelSelection,
+                runtimeMode: "approval-required",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: root,
+                activeProviderThreadId: providerThread.id,
+                lineage: {
+                  parentThreadId: null,
+                  relationshipToParent: null,
+                  rootThreadId: threadId,
+                },
+                forkedFrom: null,
+                createdAt: now,
+                updatedAt: now,
+                archivedAt: null,
+                settledOverride: null,
+                settledAt: null,
+                lastVisitedAt: null,
+                deletedAt: null,
+              };
+              const readModel = yield* (yield* ManagedRunReadModel).begin({
+                appThread,
+                providerThread,
+                providerSessionId: ProviderSessionId.make(receipt.t3ProviderSessionID),
+                runId: RunId.make(intent.canonicalRunID),
+                attemptId: RunAttemptId.make(intent.canonicalAttemptID),
+                rootNodeId: NodeId.make(receipt.childID),
+                messageId: MessageId.make(receipt.childID),
+                text: intent.input,
+              });
+              const finishReadModel = Effect.suspend(() => {
+                const outcome = observations.get(intent.commandID)?.outcome;
+                return readModel.finish(
+                  outcome === "completed" || outcome === "interrupted" ? outcome : "failed",
+                );
+              });
+              yield* Effect.addFinalizer(() => finishReadModel);
               const terminal = yield* Deferred.make<void>();
               let eventStreamSucceeded = false;
               const handleEvent = Effect.fn("ManagedExecutionProvider.handleEvent")(function* (
                 event: ProviderAdapter.ProviderAdapterV2Event,
               ) {
+                yield* readModel.ingest(event);
                 if (event.type === "provider_turn.updated") {
                   const turn = event.providerTurn;
                   if (
@@ -482,34 +529,6 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                   ),
                   Effect.forkScoped,
                 );
-              const now = yield* DateTime.now;
-              const appThread: OrchestrationV2AppThread = {
-                id: threadId,
-                projectId: ProjectId.make(intent.scope.projectID),
-                title: "Native admitted execution",
-                createdBy: "user",
-                creationSource: "web",
-                providerInstanceId: instanceId,
-                modelSelection,
-                runtimeMode: "approval-required",
-                interactionMode: "default",
-                branch: null,
-                worktreePath: root,
-                activeProviderThreadId: providerThread.id,
-                lineage: {
-                  parentThreadId: null,
-                  relationshipToParent: null,
-                  rootThreadId: threadId,
-                },
-                forkedFrom: null,
-                createdAt: now,
-                updatedAt: now,
-                archivedAt: null,
-                settledOverride: null,
-                settledAt: null,
-                lastVisitedAt: null,
-                deletedAt: null,
-              };
               if (stopping) return yield* new ExecutionControlError({ code: "executionStopped" });
               yield* beforeProviderStart;
               yield* validateExecutionWorktree(intent.worktree);

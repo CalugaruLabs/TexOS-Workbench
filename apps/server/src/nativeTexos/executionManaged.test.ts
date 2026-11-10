@@ -11,6 +11,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import { texosMissionThreadId } from "@t3tools/shared/texosMission";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexReplay from "effect-codex-app-server/replay";
 import * as Clock from "effect/Clock";
@@ -36,6 +37,7 @@ import {
   ExecutionBindingError,
   type PrivateNativeBindingSource,
 } from "./executionBinding.ts";
+import * as ReadModel from "./executionReadModel.ts";
 import {
   makeManagedExecutionProvider,
   ManagedExecutionProvider,
@@ -695,6 +697,46 @@ describe("control through private binding and actual managed lower adapters", ()
         yield* reopened.handle(syntheticRequest("execution.admit", f.intent), currentNative);
         assert.equal(f.counts().edits, 1);
       }).pipe(Effect.scoped, Effect.provide(layers)),
+  );
+
+  it.effect.each(["codex", "claudeCode"] as const)(
+    "%s run is recorded once for the coding view, keyed by the TexOS mission",
+    (provider) => {
+      const recorded: Array<string> = [];
+      const recorder = {
+        begin: (input: ReadModel.ManagedRunReadModelStart) =>
+          Effect.sync(() => {
+            recorded.push(`begin:${input.appThread.id}:${input.attemptId}`);
+            return {
+              ingest: (event: { readonly type: string }) =>
+                Effect.sync(() => void recorded.push(event.type)),
+              finish: (outcome: ReadModel.ManagedRunReadModelOutcome) =>
+                Effect.sync(() => void recorded.push(`finish:${outcome}`)),
+            };
+          }),
+      };
+      return Effect.gen(function* () {
+        const f = yield* setup(provider);
+        const control = yield* makeExecutionControl(syntheticBinding).pipe(
+          Effect.provideService(ManagedExecutionProvider, f.managed),
+        );
+        yield* control.handle(syntheticRequest("execution.admit", f.intent), f.authorize);
+        yield* control.awaitAttempt(f.intent.commandID);
+        const threadId = yield* Effect.promise(() =>
+          texosMissionThreadId(f.intent.canonicalTaskID, f.intent.canonicalAttemptID),
+        );
+        assert.equal(recorded[0], `begin:${threadId}:${f.intent.canonicalAttemptID}`);
+        assert.include(recorded, "turn.terminal");
+        assert.deepEqual(
+          recorded.filter((entry) => entry.startsWith("finish:")),
+          ["finish:completed"],
+        );
+      }).pipe(
+        Effect.provideService(ReadModel.ManagedRunReadModel, recorder),
+        Effect.scoped,
+        Effect.provide(layers),
+      );
+    },
   );
 
   it.effect.each(["close", "parser", "ignored-sdk-close"] as const)(

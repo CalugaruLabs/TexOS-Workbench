@@ -639,6 +639,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     isNativeTexos()
       ? NativeExecution.layer.pipe(
           Layer.provide(NativeExecutionReceipts.layer),
+          Layer.provide(RuntimeLayer.layerNativeMissionReadModel),
           Layer.provide(ProviderOrchestrationAdapterInfrastructure.layer),
         )
       : Layer.empty,

@@ -240,6 +240,21 @@ describe("personal agent presentation client", () => {
     expect(f.commands.filter((command) => command.method === "agents.snapshot")).toHaveLength(2);
     f.client.disconnect();
   });
+  it("reads again when a command answer names a new task source", async () => {
+    const f = fixture();
+    f.setSnapshot(structuredClone(canonicalSnapshot));
+    await f.client.connect();
+    const next = structuredClone(canonicalSnapshot);
+    next.canonicalTasks.projectionGeneration = "projection-B";
+    next.canonicalTasks.items[0]!.title = "Replacement source";
+    f.setSnapshot(next);
+    await f.client.command("agents.update", { agentID: "builder", name: "Changed" });
+    await expect
+      .poll(() => f.client.getSnapshot().snapshot?.canonicalTasks?.items[0]?.title)
+      .toBe("Replacement source");
+    expect(f.commands.filter((command) => command.method === "agents.snapshot")).toHaveLength(2);
+    f.client.disconnect();
+  });
   it("retires callbacks and reads when a connection reuses its helper and EventSource identities", async () => {
     const f = fixture();
     f.setSnapshot(structuredClone(canonicalSnapshot));

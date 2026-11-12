@@ -323,6 +323,7 @@ export class PersonalAgentClient {
           result = { ...result, snapshot: withoutPersonalAgentCanonicalTasks(result.snapshot) };
         } else {
           const accepted = this.accept(result.snapshot);
+          if (accepted.readRequired) this.refreshProjection();
           result = { ...result, snapshot: accepted.snapshot };
         }
       }

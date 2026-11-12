@@ -263,7 +263,30 @@ describe("native personal agents HTTP admission", () => {
       peer.close();
     }
   });
-  it("withholds an overtaken read even when its stale source minted a larger native revision", async () => {
+  it("two readers at once both get the tasks when their answers arrive in order", async () => {
+    const peer = nativePeer(),
+      server = nativeHTTP(peer);
+    const second = "00000000-0000-4000-8000-000000000002";
+    try {
+      await (await server.post("00000000-0000-4000-8000-000000000003")).arrayBuffer();
+      peer.holdIDs.add(id);
+      peer.holdIDs.add(second);
+      const first = server.post(id);
+      await expect.poll(() => peer.held.has(id)).toBe(true);
+      const other = server.post(second);
+      await expect.poll(() => peer.held.has(second)).toBe(true);
+      peer.release(id);
+      const firstResult = (await (await first).json()) as { result: typeof canonicalSnapshot };
+      peer.release(second);
+      const otherResult = (await (await other).json()) as { result: typeof canonicalSnapshot };
+      expect(firstResult.result.canonicalTasks).toEqual(canonicalSnapshot.canonicalTasks);
+      expect(otherResult.result.canonicalTasks).toEqual(canonicalSnapshot.canonicalTasks);
+    } finally {
+      await server.dispose();
+      peer.close();
+    }
+  });
+  it("an overtaken read shows the newer read's tasks, never its own stale ones", async () => {
     const peer = nativePeer(),
       server = nativeHTTP(peer);
     try {
@@ -284,8 +307,8 @@ describe("native personal agents HTTP admission", () => {
       };
       expect(newer.result.canonicalTasks.items[0]!.title).toBe("Current title");
       peer.release(id);
-      const oldResult = (await (await older).json()) as { result: { canonicalTasks?: unknown } };
-      expect(oldResult.result.canonicalTasks).toBeUndefined();
+      const oldResult = (await (await older).json()) as { result: typeof canonicalSnapshot };
+      expect(oldResult.result.canonicalTasks.items[0]!.title).toBe("Current title");
       expect(
         peer.commands.every((method) =>
           ["hello", "agents.hello", "agents.snapshot"].includes(method),

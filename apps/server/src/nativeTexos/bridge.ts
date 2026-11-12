@@ -104,6 +104,9 @@ export class NativeBridge {
   private agentCanonicalCursor: PersonalAgentCanonicalCursor | undefined;
   private agentCanonicalAwaitingRead = false;
   private agentSnapshotReadOrdinal = 0;
+  // Only a newer read already answered overtakes a read; readers share this bridge.
+  private agentSnapshotAnsweredOrdinal = 0;
+  private agentCanonicalPresented: PersonalAgentSnapshot["canonicalTasks"];
   private agentProjectionEpoch = 0;
   private pending = new Map<
     string,
@@ -296,8 +299,11 @@ export class NativeBridge {
       decision === "stale" ||
       decision === "readRequired" ||
       (this.agentCanonicalAwaitingRead && !freshRead)
-    )
+    ) {
+      if (decision !== "stale") this.agentCanonicalPresented = undefined;
       return withoutPersonalAgentCanonicalTasks(snapshot);
+    }
+    this.agentCanonicalPresented = snapshot.canonicalTasks;
     if (freshRead) this.agentCanonicalAwaitingRead = false;
     if (freshRead && decision === "absent") this.agentCanonicalCursor = undefined;
     if (decision === "accept" && snapshot.canonicalTasks)
@@ -561,12 +567,19 @@ export class NativeBridge {
         this.agentRevoked ||= snapshot.revoked;
         this.agentExecutionBlocked ||= !personalAgentExecutionAvailable(snapshot);
         this.agentRevision = Math.max(this.agentRevision, snapshot.revision);
-        const staleRead =
-          projectionEpoch !== this.agentProjectionEpoch ||
-          (readOrdinal !== undefined && readOrdinal !== this.agentSnapshotReadOrdinal);
-        const composed = staleRead
-          ? withoutPersonalAgentCanonicalTasks(snapshot)
-          : this.presentCanonicalTasks(snapshot, readOrdinal !== undefined);
+        const overtaken =
+          readOrdinal !== undefined && readOrdinal < this.agentSnapshotAnsweredOrdinal;
+        if (readOrdinal !== undefined && !overtaken)
+          this.agentSnapshotAnsweredOrdinal = readOrdinal;
+        const current = this.agentCanonicalPresented;
+        const composed =
+          projectionEpoch !== this.agentProjectionEpoch
+            ? withoutPersonalAgentCanonicalTasks(snapshot)
+            : !overtaken
+              ? this.presentCanonicalTasks(snapshot, readOrdinal !== undefined)
+              : current && !snapshot.revoked && !this.agentRevoked
+                ? { ...withoutPersonalAgentCanonicalTasks(snapshot), canonicalTasks: current }
+                : withoutPersonalAgentCanonicalTasks(snapshot);
         response = {
           ...response,
           result:

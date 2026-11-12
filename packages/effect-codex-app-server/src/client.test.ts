@@ -1,4 +1,5 @@
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
@@ -88,6 +89,33 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
         ),
       );
       yield* Queue.offer(input, new TextEncoder().encode('{"method":"owned/test"}\n'));
+      yield* Queue.end(input);
+      assert.isTrue(Exit.isFailure(yield* owned.parserDispatch("1 second").pipe(Effect.exit)));
+    }),
+  );
+
+  it.effect("one bad owned notification costs the drain proof but not the reader", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const client = yield* CodexClient.make(stdio, { observeOwnedInput: true });
+      const owned = client.raw.ownedInput;
+      assert.ok(owned);
+      const seen = yield* Ref.make<Array<string>>([]);
+      yield* client.handleUnknownServerNotification((method) =>
+        Ref.update(seen, (methods) => [...methods, method]),
+      );
+      const pending = yield* client.raw.request("owned/ping").pipe(Effect.forkScoped);
+      yield* Queue.take(output);
+      yield* Queue.offer(
+        input,
+        new TextEncoder().encode(
+          '{"method":"item/agentMessage/delta","params":{"delta":123}}\n' +
+            '{"method":"owned/after"}\n' +
+            '{"id":1,"result":{"pong":true}}\n',
+        ),
+      );
+      assert.deepEqual(yield* Fiber.join(pending), { pong: true });
+      assert.deepEqual(yield* Ref.get(seen), ["owned/after"]);
       yield* Queue.end(input);
       assert.isTrue(Exit.isFailure(yield* owned.parserDispatch("1 second").pipe(Effect.exit)));
     }),

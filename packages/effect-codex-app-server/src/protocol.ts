@@ -445,6 +445,8 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     const handleNotification = (notification: CodexAppServerIncomingNotification) =>
       Queue.offer(incomingNotifications, notification).pipe(
         Effect.andThen(options.onNotification ? options.onNotification(notification) : Effect.void),
+        // One bad notification costs the owned drain proof, not the reader or the turn.
+        Effect.catch((error) => (owned ? Effect.sync(() => failOwned(error)) : Effect.fail(error))),
         Effect.asVoid,
       );
 

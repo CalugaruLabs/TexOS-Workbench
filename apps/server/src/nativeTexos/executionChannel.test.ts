@@ -138,4 +138,39 @@ describe("private execution direction and correlation", () => {
     ).toThrow();
     channel.close();
   });
+
+  it("keeps answering a launch's requests past 256, and still refuses a recent repeat", async () => {
+    let answered = 0;
+    let failed = false;
+    let next: (() => void) | undefined;
+    const channel = new PrivateExecutionChannel(
+      syntheticBinding,
+      {
+        handle: async () => ({ capabilities: [] }),
+        disconnect: async () => {},
+      },
+      (frame) => {
+        if (frame.kind === "response") {
+          answered++;
+          next?.();
+        }
+      },
+      () => {
+        failed = true;
+      },
+    );
+    for (let ordinal = 1; ordinal <= 300; ordinal++) {
+      const replied = new Promise<void>((resolve) => {
+        next = resolve;
+      });
+      channel.receive(syntheticRequest("execution.hello", { capabilities: [] }, ordinal));
+      await replied;
+    }
+    expect(answered).toBe(300);
+    expect(failed).toBe(false);
+    expect(() =>
+      channel.receive(syntheticRequest("execution.hello", { capabilities: [] }, 300)),
+    ).toThrow();
+    channel.close();
+  });
 });

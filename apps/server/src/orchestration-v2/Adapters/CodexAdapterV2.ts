@@ -7655,16 +7655,18 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     detail: "Owned runtime input is closed",
                   }),
                 );
-              return produce(operation(value)).pipe(
-                Effect.mapError((error) =>
-                  error._tag === "OwnedEventDrainUnknown"
-                    ? new ProviderAdapter.ProviderAdapterProtocolError({
-                        driver: CODEX_PROVIDER,
-                        detail: error.reason,
-                        payload: error,
-                      })
-                    : error,
+              // A refused call (a stop after the turn ended) drops no provider events, so the
+              // producer still succeeds; only defects and interruption cost the drain proof.
+              return produce(Effect.result(operation(value))).pipe(
+                Effect.mapError(
+                  (error) =>
+                    new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver: CODEX_PROVIDER,
+                      detail: error.reason,
+                      payload: error,
+                    }),
                 ),
+                Effect.flatMap(Effect.fromResult),
               );
             });
         const exposed: ProviderAdapter.ProviderAdapterV2SessionRuntime = owned

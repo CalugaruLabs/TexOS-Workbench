@@ -14,6 +14,7 @@ import {
   NodeId,
   ProjectId,
   ProviderSessionId,
+  ProviderTurnId,
   RunAttemptId,
   RunId,
   ThreadId,
@@ -395,9 +396,12 @@ describe("owned Claude transport observations", () => {
     ),
   );
 
-  it.effect(
-    "actual Claude adapter joins a fake owned child and actual consumer after one repository edit",
-    () =>
+  it.effect.each([
+    { refusedStop: false, name: "after one repository edit" },
+    { refusedStop: true, name: "after a refused stop for a turn that is not active" },
+  ])(
+    "actual Claude adapter joins a fake owned child and actual consumer $name",
+    ({ refusedStop }) =>
       Effect.scoped(
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
@@ -515,6 +519,15 @@ describe("owned Claude transport observations", () => {
           yield* Effect.promise(() => f.promptSeen.promise);
           assert.equal(edits, 1);
           assert.equal(yield* fs.readFileString(answer), "export const answer = 42;\n");
+          if (refusedStop) {
+            const refused = yield* runtime
+              .interruptTurn({
+                providerThread,
+                providerTurnId: ProviderTurnId.make("owned-adapter-finished-turn"),
+              })
+              .pipe(Effect.exit);
+            assert.isTrue(Exit.isFailure(refused));
+          }
           const observation = getClaudeOwnedEventLifecycle(runtime);
           assert.ok(observation);
           assert.equal(getClaudeOwnedEventLifecycle({ ...runtime }), undefined);

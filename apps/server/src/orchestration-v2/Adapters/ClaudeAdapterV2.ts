@@ -11668,16 +11668,17 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   if (ownedControlCount++ === 0) ownedControlsDone = Deferred.makeUnsafe();
                 });
               }),
+              // A refused call (a stop after the turn ended) drops no provider events, so it
+              // neither closes input nor costs the drain proof; defects and interruption do.
               () =>
-                produce(operation(value)).pipe(
-                  Effect.mapError((error) =>
-                    error._tag === "OwnedEventDrainUnknown"
-                      ? new ProviderAdapter.ProviderAdapterProtocolError({
-                          driver: CLAUDE_PROVIDER,
-                          detail: error.reason,
-                          payload: error,
-                        })
-                      : error,
+                produce(Effect.result(operation(value))).pipe(
+                  Effect.mapError(
+                    (error) =>
+                      new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: CLAUDE_PROVIDER,
+                        detail: error.reason,
+                        payload: error,
+                      }),
                   ),
                 ),
               (_, exit) =>
@@ -11694,7 +11695,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                       ownedControlFailure ? Effect.fail(ownedControlFailure) : Effect.void,
                     );
                 }),
-            );
+            ).pipe(Effect.flatMap(Effect.fromResult));
         const exposed: ProviderAdapter.ProviderAdapterV2SessionRuntime = ownedBroker
           ? {
               ...runtime,

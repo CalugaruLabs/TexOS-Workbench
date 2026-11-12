@@ -6788,9 +6788,12 @@ describe("Codex owned event prefix integration", () => {
     ),
   );
 
-  it.effect(
-    "actual adapter and client require child exit, real parser EOF and handler-completed ACK",
-    () =>
+  it.effect.each([
+    { refusedStop: false, name: "" },
+    { refusedStop: true, name: ", even after a refused stop" },
+  ])(
+    "actual adapter and client require child exit, real parser EOF and handler-completed ACK$name",
+    ({ refusedStop }) =>
       Effect.scoped(
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
@@ -6946,6 +6949,15 @@ describe("Codex owned event prefix integration", () => {
             runtimePolicy,
             appThread: { ...turnInput.appThread, worktreePath: root },
           });
+          if (refusedStop) {
+            const refused = yield* runtime
+              .interruptTurn({
+                providerThread,
+                providerTurnId: ProviderTurnId.make("owned-codex-finished-turn"),
+              })
+              .pipe(Effect.exit);
+            assert.isTrue(Exit.isFailure(refused));
+          }
           const sealing = yield* observation.seal("1 second").pipe(Effect.forkScoped);
           yield* Deferred.await(written);
           assert.equal(sealing.pollUnsafe(), undefined);

@@ -7642,33 +7642,46 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ),
         };
         let ownedAdmissionClosed = false;
+        // Seal closes provider input only after control calls already running have returned.
+        let ownedControlCount = 0;
+        let ownedControlsDone = Deferred.makeUnsafe<void>();
         const wrapOwnedControl =
           <A, B>(
             operation: (value: A) => Effect.Effect<B, ProviderAdapter.ProviderAdapterV2Error>,
           ) =>
           (value: A) =>
-            Effect.suspend(() => {
-              if (ownedAdmissionClosed)
-                return Effect.fail(
-                  new ProviderAdapter.ProviderAdapterProtocolError({
-                    driver: CODEX_PROVIDER,
-                    detail: "Owned runtime input is closed",
-                  }),
-                );
-              // A refused call (a stop after the turn ended) drops no provider events, so the
-              // producer still succeeds; only defects and interruption cost the drain proof.
-              return produce(Effect.result(operation(value))).pipe(
-                Effect.mapError(
-                  (error) =>
+            Effect.acquireUseRelease(
+              Effect.suspend(() => {
+                if (ownedAdmissionClosed)
+                  return Effect.fail(
                     new ProviderAdapter.ProviderAdapterProtocolError({
                       driver: CODEX_PROVIDER,
-                      detail: error.reason,
-                      payload: error,
+                      detail: "Owned runtime input is closed",
                     }),
+                  );
+                return Effect.sync(() => {
+                  if (ownedControlCount++ === 0) ownedControlsDone = Deferred.makeUnsafe();
+                });
+              }),
+              // A refused call (a stop after the turn ended) drops no provider events, so the
+              // producer still succeeds; only defects and interruption cost the drain proof.
+              () =>
+                produce(Effect.result(operation(value))).pipe(
+                  Effect.mapError(
+                    (error) =>
+                      new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: CODEX_PROVIDER,
+                        detail: error.reason,
+                        payload: error,
+                      }),
+                  ),
                 ),
-                Effect.flatMap(Effect.fromResult),
-              );
-            });
+              () =>
+                Effect.sync(() => {
+                  if (--ownedControlCount === 0)
+                    Deferred.doneUnsafe(ownedControlsDone, Effect.void);
+                }),
+            ).pipe(Effect.flatMap(Effect.fromResult));
         const exposed: ProviderAdapter.ProviderAdapterV2SessionRuntime = owned
           ? {
               ...runtime,
@@ -7722,6 +7735,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     reason: "joinWhileProducing",
                   });
                 ownedAdmissionClosed = true;
+                if (ownedControlCount === 0) Deferred.doneUnsafe(ownedControlsDone, Effect.void);
+                yield* Deferred.await(ownedControlsDone).pipe(
+                  Effect.timeoutOrElse({
+                    duration: timeout,
+                    orElse: () =>
+                      Effect.fail(
+                        new OwnedEvents.OwnedEventDrainUnknown({ reason: "producerTimeout" }),
+                      ),
+                  }),
+                );
                 yield* owned.transport.input.finishInput;
                 yield* owned.transport.input.providerInput(timeout);
                 yield* owned.transport.childExit(timeout);

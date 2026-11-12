@@ -6789,11 +6789,12 @@ describe("Codex owned event prefix integration", () => {
   );
 
   it.effect.each([
-    { refusedStop: false, name: "" },
-    { refusedStop: true, name: ", even after a refused stop" },
+    { refusedStop: false, heldStart: false, name: "" },
+    { refusedStop: true, heldStart: false, name: ", even after a refused stop" },
+    { refusedStop: false, heldStart: true, name: ", and seal waits for a running turn start" },
   ])(
     "actual adapter and client require child exit, real parser EOF and handler-completed ACK$name",
-    ({ refusedStop }) =>
+    ({ refusedStop, heldStart }) =>
       Effect.scoped(
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
@@ -6810,6 +6811,10 @@ describe("Codex owned event prefix integration", () => {
           const inbound = yield* Queue.unbounded<Uint8Array, Cause.Done<void>>();
           const childExit = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
           const written = yield* Deferred.make<void>();
+          const startHeld = yield* Deferred.make<void>(),
+            releaseStart = yield* Deferred.make<void>();
+          const order: string[] = [];
+          const testScope = yield* Effect.scope;
           const nativeThreadId = "owned-codex-native-thread",
             nativeTurnId = "owned-codex-native-turn";
           const preamble = codexReplayPreamble({
@@ -6855,20 +6860,38 @@ describe("Codex owned event prefix integration", () => {
                 assert.equal(edits++, 0);
                 yield* fs.writeFileString(answer, "export const answer = 42;\n");
               }
-              yield* send({ id: frame.id, result });
-              if (frame.method === "turn/start") {
-                const turn =
-                  typeof result === "object" && result !== null
-                    ? Reflect.get(result, "turn")
-                    : undefined;
-                assert.ok(turn);
-                yield* send({
-                  method: "turn/completed",
-                  params: { threadId: nativeThreadId, turn: { ...turn, status: "completed" } },
-                });
+              const reply = Effect.gen(function* () {
+                yield* send({ id: frame.id, result });
+                if (frame.method === "turn/start") {
+                  order.push("turn start answered");
+                  const turn =
+                    typeof result === "object" && result !== null
+                      ? Reflect.get(result, "turn")
+                      : undefined;
+                  assert.ok(turn);
+                  yield* send({
+                    method: "turn/completed",
+                    params: { threadId: nativeThreadId, turn: { ...turn, status: "completed" } },
+                  });
+                }
+              });
+              if (heldStart && frame.method === "turn/start") {
+                yield* Deferred.succeed(startHeld, undefined);
+                yield* Deferred.await(releaseStart).pipe(
+                  Effect.andThen(reply),
+                  Effect.forkIn(testScope),
+                );
+                return;
               }
+              yield* reply;
             }),
-          ).pipe(Sink.ensuring(Deferred.succeed(written, undefined)));
+          ).pipe(
+            Sink.ensuring(
+              Effect.sync(() => order.push("input closed")).pipe(
+                Effect.andThen(Deferred.succeed(written, undefined)),
+              ),
+            ),
+          );
           const handle: ChildProcessSpawner.ChildProcessHandle = {
             "~effect/process/ChildProcessSpawner/ChildProcessHandle":
               "~effect/process/ChildProcessSpawner/ChildProcessHandle",
@@ -6944,21 +6967,35 @@ describe("Codex owned event prefix integration", () => {
             attemptId: RunAttemptId.make("owned-codex-attempt"),
             text: "Edit only answer.ts",
           });
-          yield* runtime.startTurn({
-            ...turnInput,
-            runtimePolicy,
-            appThread: { ...turnInput.appThread, worktreePath: root },
-          });
-          if (refusedStop) {
-            const refused = yield* runtime
-              .interruptTurn({
-                providerThread,
-                providerTurnId: ProviderTurnId.make("owned-codex-finished-turn"),
+          const startTurn = runtime
+            .startTurn({
+              ...turnInput,
+              runtimePolicy,
+              appThread: { ...turnInput.appThread, worktreePath: root },
+            })
+            .pipe(Effect.asVoid);
+          const sealing = yield* heldStart
+            ? Effect.gen(function* () {
+                const starting = yield* Effect.forkScoped(startTurn);
+                yield* Deferred.await(startHeld);
+                const sealing = yield* Effect.forkScoped(observation.seal("1 second"));
+                yield* Deferred.succeed(releaseStart, undefined);
+                yield* Fiber.join(starting);
+                return sealing;
               })
-              .pipe(Effect.exit);
-            assert.isTrue(Exit.isFailure(refused));
-          }
-          const sealing = yield* observation.seal("1 second").pipe(Effect.forkScoped);
+            : Effect.gen(function* () {
+                yield* startTurn;
+                if (refusedStop) {
+                  const refused = yield* runtime
+                    .interruptTurn({
+                      providerThread,
+                      providerTurnId: ProviderTurnId.make("owned-codex-finished-turn"),
+                    })
+                    .pipe(Effect.exit);
+                  assert.isTrue(Exit.isFailure(refused));
+                }
+                return yield* Effect.forkScoped(observation.seal("1 second"));
+              });
           yield* Deferred.await(written);
           assert.equal(sealing.pollUnsafe(), undefined);
           yield* Deferred.succeed(childExit, ChildProcessSpawner.ExitCode(0));
@@ -6979,6 +7016,7 @@ describe("Codex owned event prefix integration", () => {
           assert.equal(edits, 1);
           assert.equal(yield* fs.readFileString(answer), "export const answer = 42;\n");
           assert.isTrue(events.some((event) => event.type === "turn.terminal"));
+          assert.deepEqual(order, ["turn start answered", "input closed"]);
         }).pipe(
           Effect.provide(
             Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),

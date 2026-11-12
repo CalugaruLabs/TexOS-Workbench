@@ -102,6 +102,49 @@ export class ManagedExecutionProvider extends Context.Service<
   }
 >()("t3/nativeTexos/executionManaged/ManagedExecutionProvider") {}
 
+const sha256OfFile = async (handle: NodeFSP.FileHandle) => {
+  const hash = NodeCrypto.createHash("sha256");
+  for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 }))
+    hash.update(chunk);
+  return hash.digest("hex");
+};
+
+/**
+ * Checks the bound CLI binary before each start. A match is reused while the file's
+ * identity is unchanged, but only once its last change is older than the timestamp
+ * granularity can blur: a rewrite in the same tick could otherwise keep the old ctime.
+ */
+export const makeExecutableCheck = ({
+  hashFile = sha256OfFile,
+  now = () => Date.now(),
+}: {
+  readonly hashFile?: (handle: NodeFSP.FileHandle) => Promise<string>;
+  readonly now?: () => number;
+} = {}) => {
+  const verified = new Map<string, string>();
+  return async (path: string, sha256: string) => {
+    if ((await NodeFSP.realpath(path)) !== path) throw new Error("linkedExecutable");
+    const checkedAt = now();
+    const handle = await NodeFSP.open(
+      path,
+      NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW,
+    );
+    try {
+      const stat = await handle.stat({ bigint: true });
+      if (!stat.isFile()) throw new Error("changedExecutable");
+      const identity = [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, sha256].join(
+        ":",
+      );
+      if (verified.get(path) === identity) return;
+      verified.delete(path);
+      if ((await hashFile(handle)) !== sha256) throw new Error("changedExecutable");
+      if (Number(stat.ctimeMs) < checkedAt - 2_000) verified.set(path, identity);
+    } finally {
+      await handle.close();
+    }
+  };
+};
+
 const decodeCodex = Schema.decodeSync(CodexSettings);
 const OWNED_DRAIN_TIMEOUT = "5 seconds";
 const decodeClaude = Schema.decodeSync(ClaudeSettings);
@@ -118,6 +161,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const observations = new Map<string, ManagedExecutionObservation>();
+  const checkExecutableFile = makeExecutableCheck();
   const supports = (provider: "codex" | "claudeCode") =>
     bindings.available &&
     (provider === "codex" ? transports?.codex !== undefined : transports?.claude !== undefined);
@@ -186,25 +230,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
               const intent = receipt.intent;
               const root = intent.worktree.root;
               const checkExecutable = Effect.tryPromise({
-                try: async () => {
-                  if ((await NodeFSP.realpath(bound.executablePath)) !== bound.executablePath)
-                    throw new Error("linkedExecutable");
-                  const handle = await NodeFSP.open(
-                    bound.executablePath,
-                    NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW,
-                  );
-                  try {
-                    if (
-                      !(await handle.stat()).isFile() ||
-                      NodeCrypto.createHash("sha256")
-                        .update(await handle.readFile())
-                        .digest("hex") !== bound.executableSHA256
-                    )
-                      throw new Error("changedExecutable");
-                  } finally {
-                    await handle.close();
-                  }
-                },
+                try: () => checkExecutableFile(bound.executablePath, bound.executableSHA256),
                 catch: () => new ExecutionControlError({ code: "managedExecutableChanged" }),
               });
               yield* checkExecutable;

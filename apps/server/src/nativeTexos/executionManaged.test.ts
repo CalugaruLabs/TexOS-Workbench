@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Disposable Git repositories and injected transports only.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 import * as ClaudeSdk from "@anthropic-ai/claude-agent-sdk";
@@ -39,6 +40,7 @@ import {
 } from "./executionBinding.ts";
 import * as ReadModel from "./executionReadModel.ts";
 import {
+  makeExecutableCheck,
   makeManagedExecutionProvider,
   ManagedExecutionProvider,
   OwnedExecutionTransportError,
@@ -817,4 +819,65 @@ describe("control through private binding and actual managed lower adapters", ()
       assert.deepEqual(f.counts(), { reads: 0, access: 0, opens: 0, edits: 0, joins: 0 });
     }).pipe(Effect.scoped, Effect.provide(layers)),
   );
+});
+
+describe("managed executable check", () => {
+  const sha256 = (text: string) => NodeCrypto.createHash("sha256").update(text).digest("hex");
+  const withExecutable = async (run: (path: string) => Promise<void>) => {
+    const directory = await NodeFSP.realpath(
+      await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "texos-executable-")),
+    );
+    try {
+      const path = NodePath.join(directory, "cli");
+      await NodeFSP.writeFile(path, "first build");
+      await run(path);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  };
+  const countingCheck = (now?: () => number) => {
+    let hashes = 0;
+    const check = makeExecutableCheck({
+      hashFile: async (handle) => {
+        hashes++;
+        return sha256(String(await handle.readFile()));
+      },
+      ...(now ? { now } : {}),
+    });
+    return { check, hashes: () => hashes };
+  };
+
+  it("hashes a settled executable once and still refuses a changed one", async () => {
+    await withExecutable(async (path) => {
+      const f = countingCheck(() => Number.MAX_SAFE_INTEGER);
+      await f.check(path, sha256("first build"));
+      await f.check(path, sha256("first build"));
+      assert.equal(f.hashes(), 1);
+      await NodeFSP.writeFile(path, "a longer second build");
+      assert.equal(
+        await f.check(path, sha256("first build")).then(
+          () => "accepted",
+          () => "refused",
+        ),
+        "refused",
+      );
+      assert.equal(f.hashes(), 2);
+    });
+  });
+
+  it("hashes a just-changed executable every time, so a same-size rewrite is caught", async () => {
+    await withExecutable(async (path) => {
+      const f = countingCheck();
+      await f.check(path, sha256("first build"));
+      await NodeFSP.writeFile(path, "other build");
+      assert.equal(
+        await f.check(path, sha256("first build")).then(
+          () => "accepted",
+          () => "refused",
+        ),
+        "refused",
+      );
+      assert.equal(f.hashes(), 2);
+    });
+  });
 });

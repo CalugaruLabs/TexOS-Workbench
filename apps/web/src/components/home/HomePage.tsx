@@ -66,7 +66,9 @@ export function HomePage({
               <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
                 {DATE_FORMAT.format(now)}
               </p>
-              <h1 className="mt-2 text-3xl font-semibold">{homeGreeting(now.getHours())}.</h1>
+              <h1 className="mt-2 text-4xl font-bold tracking-tight">
+                {homeGreeting(now.getHours())}.
+              </h1>
               <p className="mt-2 text-muted-foreground">
                 {homeSummary(sections.needsYou.length, sections.running.length)}
               </p>
@@ -189,7 +191,7 @@ function HomeThreadSection({
   if (entries.length === 0) return null;
   return (
     <section aria-labelledby={`home-${id}`}>
-      <h2 id={`home-${id}`} className="mb-2 text-xs font-medium text-muted-foreground">
+      <h2 id={`home-${id}`} className="mb-2 text-xs font-semibold text-muted-foreground">
         {title} · {entries.length}
       </h2>
       <ul className="flex flex-col divide-y rounded-lg border">

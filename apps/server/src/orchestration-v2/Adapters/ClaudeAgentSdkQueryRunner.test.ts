@@ -50,6 +50,7 @@ import {
   makeClaudeAdapterV2,
   getClaudeOwnedEventLifecycle,
   CLAUDE_DEFAULT_INSTANCE_ID,
+  makeOwnedFrameLines,
 } from "./ClaudeAdapterV2.ts";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", { spy: true });
@@ -330,6 +331,20 @@ const ownedPrompt = {
 } satisfies ClaudeSdk.SDKUserMessage;
 
 describe("owned Claude transport observations", () => {
+  it("splits owned SDK frames across chunks and bounds each frame, not each chunk", () => {
+    const lines: Array<string> = [];
+    const feed = makeOwnedFrameLines(16, (text) => lines.push(text));
+    const bytes = new TextEncoder().encode('{"a":"é"}\n{"b":2}\n');
+    for (const byte of bytes) feed(Uint8Array.of(byte));
+    feed(new TextEncoder().encode("1234567890\nabcdefghij\n"));
+    feed();
+    assert.deepEqual(lines, ['{"a":"é"}', '{"b":2}', "1234567890", "abcdefghij", ""]);
+    const bounded = makeOwnedFrameLines(16, () => {});
+    assert.throws(() => {
+      for (const byte of new TextEncoder().encode("x".repeat(17))) bounded(Uint8Array.of(byte));
+    }, "SDK frame too large");
+  });
+
   it.effect.each(["[]\n", "{}\n", '{"type":"unknown-provider-frame"}\n'])(
     "unsupported JSON SDK input remains unknown: %s",
     (bytes) =>

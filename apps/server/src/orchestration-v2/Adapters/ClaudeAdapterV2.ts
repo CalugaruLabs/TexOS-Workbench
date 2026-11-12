@@ -695,6 +695,36 @@ const ownedClaudeWireTypes = new Set([
   "transcript_mirror",
 ]);
 
+/** Splits owned SDK output into frames for `line`; `maxFrameBytes` bounds one frame. */
+export const makeOwnedFrameLines = (maxFrameBytes: number, line: (text: string) => void) => {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  // Only new text is scanned and measured, so a frame split over many chunks stays linear.
+  const pending: Array<string> = [];
+  let pendingBytes = 0;
+  const take = (fragment: string) => {
+    pendingBytes += Buffer.byteLength(fragment, "utf8");
+    if (pendingBytes > maxFrameBytes) throw Error("SDK frame too large");
+    pending.push(fragment);
+  };
+  const emit = () => {
+    const text = pending.join("");
+    pending.length = 0;
+    pendingBytes = 0;
+    line(text);
+  };
+  return (bytes?: Uint8Array) => {
+    const text = bytes === undefined ? decoder.decode() : decoder.decode(bytes, { stream: true });
+    let start = 0;
+    for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", start)) {
+      take(text.slice(start, i));
+      emit();
+      start = i + 1;
+    }
+    take(text.slice(start));
+    if (bytes === undefined) emit();
+  };
+};
+
 const makeOwnedClaudeObservation = (finishPrompts: Effect.Effect<void>) => {
   const bound = Deferred.makeUnsafe<object, ClaudeAgentSdkQueryRunnerError>();
   const promptEOF = Deferred.makeUnsafe<void, ClaudeAgentSdkQueryRunnerError>();
@@ -749,8 +779,6 @@ const makeOwnedClaudeObservation = (finishPrompts: Effect.Effect<void>) => {
       ),
     );
   const validate = (incoming: boolean) => {
-    const decoder = new TextDecoder("utf-8", { fatal: true });
-    let remainder = "";
     const line = (text: string) => {
       if (!text.trim()) return;
       const frame = decodeOwnedClaudeFrame(text);
@@ -800,21 +828,7 @@ const makeOwnedClaudeObservation = (finishPrompts: Effect.Effect<void>) => {
         settle();
       }
     };
-    return (bytes?: Uint8Array) => {
-      remainder += bytes === undefined ? decoder.decode() : decoder.decode(bytes, { stream: true });
-      if (Buffer.byteLength(remainder, "utf8") > 128 * 1024 * 1024)
-        throw Error("SDK frame too large");
-      for (;;) {
-        const i = remainder.indexOf("\n");
-        if (i < 0) break;
-        line(remainder.slice(0, i));
-        remainder = remainder.slice(i + 1);
-      }
-      if (bytes === undefined) {
-        line(remainder);
-        remainder = "";
-      }
-    };
+    return makeOwnedFrameLines(128 * 1024 * 1024, line);
   };
   return {
     beforeSpawn: () => {

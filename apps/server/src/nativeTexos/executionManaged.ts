@@ -41,6 +41,12 @@ import {
   executionObservationKey,
   type BoundCliExecution,
 } from "./executionBinding.ts";
+import {
+  checkManagedCodexConfiguration,
+  checkManagedCodexMcpInventory,
+  checkManagedCodexThread,
+  managedCodexLaunchArgs,
+} from "./executionCodexProfile.ts";
 import { ExecutionControlError, type ControlledExecutionAttempt } from "./executionControl.ts";
 import * as Receipts from "./executionReceipts.ts";
 import type { ManagedExecutionObservation } from "./executionProtocol.ts";
@@ -142,6 +148,21 @@ export const makeExecutableCheck = (hashFile = sha256OfFile) => {
 };
 
 const decodeCodex = Schema.decodeSync(CodexSettings);
+// Everything else a managed Codex run might ask for is refused before it reaches Codex.
+const MANAGED_CODEX_REQUESTS = new Set([
+  "initialize",
+  "thread/start",
+  "turn/start",
+  "turn/interrupt",
+  "thread/read",
+  "thread/unsubscribe",
+]);
+const refusedCodexRequest = (method: string) =>
+  new CodexError.CodexAppServerRequestError({
+    code: -32001,
+    errorMessage: "Refused by native execution",
+    method,
+  });
 const OWNED_DRAIN_TIMEOUT = "5 seconds";
 const decodeClaude = Schema.decodeSync(ClaudeSettings);
 
@@ -154,8 +175,15 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
   const crypto = yield* Crypto.Crypto;
   const allocator = yield* IdAllocator.IdAllocatorV2;
   const config = yield* ServerConfig.ServerConfig;
-  const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  // Managed runs get no MCP server, T3's own included.
+  const noMcpSessions = McpProviderSessions.McpProviderSessions.of({
+    ...(yield* McpProviderSessions.McpProviderSessions),
+    read: Effect.fn("ManagedExecutionProvider.readNoMcpSession")(
+      // @effect-diagnostics-next-line effectSucceedWithVoid:off - The optional result requires undefined, not void.
+      () => Effect.succeed(undefined),
+    ),
+  });
   const observations = new Map<string, ManagedExecutionObservation>();
   const answers = new Map<string, string>();
   const checkExecutableFile = makeExecutableCheck();
@@ -226,6 +254,12 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
               const bound = yield* bindings.resolve(receipt);
               publish({});
               const ownedScope = yield* Scope.make();
+              // A request from Codex means it wants something a managed run never grants.
+              const refused = yield* Deferred.make<void>();
+              const refuse = (method: string) =>
+                Deferred.succeed(refused, undefined).pipe(
+                  Effect.andThen(Effect.fail(refusedCodexRequest(method))),
+                );
               yield* Effect.addFinalizer(() => Scope.close(ownedScope, Exit.void));
               const intent = receipt.intent;
               const root = intent.worktree.root;
@@ -260,7 +294,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                   Effect.provideService(HostProcess.HomeDirectory, bound.profile.homeDirectory),
                   Effect.provideService(HostProcess.WorkingDirectory, root),
                   Effect.provideService(Scope.Scope, ownedScope),
-                  Effect.provideService(McpProviderSessions.McpProviderSessions, mcpSessions),
+                  Effect.provideService(McpProviderSessions.McpProviderSessions, noMcpSessions),
                   Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, {
                     ...spawner,
                     spawn: () => Effect.die("Managed execution requires its owned transport"),
@@ -274,8 +308,23 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
               const instanceId = ProviderInstanceId.make(
                 `native_${NodeCrypto.createHash("sha256").update(bound.configuration.connectionID).digest("hex").slice(0, 56)}`,
               );
-              const adapter =
+              const codexRestrictions = bound.codex;
+              const codexLaunchArgs =
                 intent.configuration.provider === "codex"
+                  ? yield* Effect.try({
+                      try: () => {
+                        if (!codexRestrictions) throw new Error("managedCodexProfileMissing");
+                        return managedCodexLaunchArgs(
+                          bound.configuration.modelID,
+                          codexRestrictions,
+                        );
+                      },
+                      catch: () =>
+                        new ExecutionControlError({ code: "managedCodexProfileInvalid" }),
+                    })
+                  : "";
+              const adapter =
+                intent.configuration.provider === "codex" && codexRestrictions
                   ? yield* isolate(
                       Codex.makeCodexAdapterV2({
                         instanceId,
@@ -283,7 +332,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                           setupMode: "existing",
                           binaryPath: bound.executablePath,
                           homePath: bound.profile.profileDirectory,
-                          launchArgs: "",
+                          launchArgs: codexLaunchArgs,
                         }),
                         environment,
                         crypto,
@@ -303,21 +352,95 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                                   operation: "ownedTransportMissing",
                                 });
                               lifecycle = owned;
-                              const request: typeof owned.client.request = (method, payload) =>
-                                method === "turn/start"
-                                  ? checkedStart.pipe(
-                                      Effect.mapError(
-                                        () =>
-                                          new CodexError.CodexAppServerRequestError({
-                                            code: -32001,
-                                            errorMessage: "Native execution start denied",
-                                            method: "turn/start",
-                                          }),
+                              const model = bound.configuration.modelID;
+                              const profileCheck = (method: string, check: () => void) =>
+                                Effect.try({
+                                  try: check,
+                                  catch: () => refusedCodexRequest(method),
+                                });
+                              // The effective configuration and MCP inventory, read just before
+                              // the turn, must still be the managed profile.
+                              const effectiveProfile = owned.client.raw
+                                .request("config/read", { cwd: root, includeLayers: false })
+                                .pipe(
+                                  Effect.flatMap((config) =>
+                                    profileCheck("config/read", () =>
+                                      checkManagedCodexConfiguration(
+                                        config,
+                                        model,
+                                        codexRestrictions,
                                       ),
-                                      Effect.andThen(owned.client.request(method, payload)),
-                                    )
-                                  : owned.client.request(method, payload);
-                              return { ...owned.client, request };
+                                    ),
+                                  ),
+                                  Effect.andThen(
+                                    owned.client.raw.request("mcpServerStatus/list", {
+                                      limit: 256,
+                                    }),
+                                  ),
+                                  Effect.flatMap((inventory) =>
+                                    profileCheck("mcpServerStatus/list", () =>
+                                      checkManagedCodexMcpInventory(inventory),
+                                    ),
+                                  ),
+                                );
+                              const request: typeof owned.client.request = (method, payload) => {
+                                if (method === "thread/start")
+                                  return owned.client
+                                    .request(method, {
+                                      ...(payload as object),
+                                      developerInstructions:
+                                        codexRestrictions.developerInstructions,
+                                    } as typeof payload)
+                                    .pipe(
+                                      Effect.tap((response) =>
+                                        Effect.tryPromise({
+                                          try: () =>
+                                            checkManagedCodexThread(
+                                              response,
+                                              model,
+                                              codexRestrictions,
+                                            ),
+                                          catch: () => refusedCodexRequest(method),
+                                        }),
+                                      ),
+                                    );
+                                if (method === "turn/start")
+                                  return effectiveProfile.pipe(
+                                    Effect.andThen(
+                                      checkedStart.pipe(
+                                        Effect.mapError(
+                                          () =>
+                                            new CodexError.CodexAppServerRequestError({
+                                              code: -32001,
+                                              errorMessage: "Native execution start denied",
+                                              method: "turn/start",
+                                            }),
+                                        ),
+                                      ),
+                                    ),
+                                    Effect.andThen(owned.client.request(method, payload)),
+                                  );
+                                return MANAGED_CODEX_REQUESTS.has(method)
+                                  ? owned.client.request(method, payload)
+                                  : Effect.fail(refusedCodexRequest(method));
+                              };
+                              const restricted: typeof owned.client = {
+                                ...owned.client,
+                                raw: {
+                                  ...owned.client.raw,
+                                  request: (method, payload) =>
+                                    method === "thread/read"
+                                      ? owned.client.raw.request(method, payload)
+                                      : Effect.fail(refusedCodexRequest(method)),
+                                },
+                                request,
+                                // Approvals are off, so any request from Codex is unexpected.
+                                handleServerRequest: (method) =>
+                                  owned.client.handleServerRequest(method, () => refuse(method)),
+                                handleUnknownServerRequest: () =>
+                                  owned.client.handleUnknownServerRequest(refuse),
+                              };
+                              return restricted;
                             },
                             (effect, input) =>
                               effect.pipe(
@@ -426,7 +549,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                 runtimeMode: "approval-required",
                 interactionMode: "default",
                 cwd: root,
-                approvalPolicy: "on-request",
+                approvalPolicy: intent.configuration.provider === "codex" ? "never" : "on-request",
                 sandboxPolicy: {
                   type: "workspaceWrite",
                   writableRoots: [root],
@@ -574,6 +697,12 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                   Effect.forkScoped,
                 );
               if (stopping) return yield* new ExecutionControlError({ code: "executionStopped" });
+              const refusedRequest = Deferred.await(refused).pipe(
+                Effect.andThen(
+                  Effect.fail(new ExecutionControlError({ code: "managedProviderRequestRefused" })),
+                ),
+              );
+              if (yield* Deferred.isDone(refused)) return yield* refusedRequest;
               yield* beforeProviderStart;
               yield* validateExecutionWorktree(intent.worktree);
               yield* isolate(
@@ -598,7 +727,8 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                 }),
               );
               yield* interruptIfStopping;
-              yield* Deferred.await(terminal);
+              // Ending the run closes Codex's input, which ends the refused turn too.
+              yield* Effect.raceFirst(Deferred.await(terminal), refusedRequest);
               const drainUnproven = () =>
                 new ExecutionControlError({ code: "managedEventDrainUnproven" });
               const codexLifecycle =

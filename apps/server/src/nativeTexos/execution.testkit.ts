@@ -6,11 +6,19 @@ import type {
 } from "./executionProtocol.ts";
 import { decodeExecutionHostRequest, executionEnvelope } from "./executionProtocol.ts";
 import * as Effect from "effect/Effect";
+import type { ManagedCodexRestrictions } from "./executionBinding.ts";
 import Migration070 from "../persistence/Migrations/070_NativeExecutionReceipts.ts";
 import Migration071 from "../persistence/Migrations/071_NativeExecutionOutcomes.ts";
 
 /** The receipt tables as T3 builds them today. */
 export const executionReceiptMigrations = Migration070.pipe(Effect.andThen(Migration071));
+
+/** What TexOS fixes for a managed Codex run, with no owner instruction file approved. */
+export const syntheticCodexRestrictions: ManagedCodexRestrictions = {
+  chatgptWorkspaceID: "synthetic-workspace",
+  developerInstructions: "Change files in the current folder only. Do not use the network.",
+  approvedInstructionSources: [],
+};
 
 export const syntheticBinding: ExecutionChannelBinding = {
   authorityID: "synthetic-authority",

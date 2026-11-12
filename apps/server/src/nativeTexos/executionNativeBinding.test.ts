@@ -56,6 +56,13 @@ const wire = () => ({
     profileRevision: "1",
   },
   model: { id: "synthetic-model", provider: "codex" },
+  codex: {
+    chatgptWorkspaceID: "synthetic-workspace",
+    developerInstructions: "Change files in the current folder only.",
+    approvedInstructionSources: [
+      { path: "/synthetic/home/.codex/AGENTS.md", sha256: "2".repeat(64) },
+    ],
+  },
 });
 
 describe("native execution binding", () => {
@@ -66,8 +73,37 @@ describe("native execution binding", () => {
       assert.strictEqual(binding.executable.path, "/synthetic/bin/codex");
       const profile = yield* binding.acquirePermittedProfile;
       assert.deepStrictEqual(profile.environment, { CODEX_HOME: "/synthetic/home/.codex" });
+      assert.deepStrictEqual(binding.codex, wire().codex);
+      const { codex: _, ...claude } = wire();
+      assert.isUndefined(decodeNativeBinding(claude).codex);
     }),
   );
+
+  it("refuses Codex restrictions with extra fields, a non-text instruction or too many files", () => {
+    const base = wire();
+    assert.throws(() =>
+      decodeNativeBinding({ ...base, codex: { ...base.codex, baseInstructions: "x" } }),
+    );
+    assert.throws(() =>
+      decodeNativeBinding({ ...base, codex: { ...base.codex, developerInstructions: 1 } }),
+    );
+    const source = base.codex.approvedInstructionSources[0]!;
+    assert.throws(() =>
+      decodeNativeBinding({
+        ...base,
+        codex: { ...base.codex, approvedInstructionSources: Array(9).fill(source) },
+      }),
+    );
+    assert.throws(() =>
+      decodeNativeBinding({
+        ...base,
+        codex: {
+          ...base.codex,
+          approvedInstructionSources: [{ ...source, enabled: true }],
+        },
+      }),
+    );
+  });
 
   it("refuses extra fields, a paid route, an unknown provider and a large environment", () => {
     const extra = wire();

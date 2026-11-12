@@ -27,6 +27,17 @@ export interface PermittedCliProfile {
   readonly environment: Readonly<Record<string, string>>;
 }
 
+/** What TexOS fixes for a managed Codex run: the login workspace and the instructions. */
+export interface ManagedCodexRestrictions {
+  readonly chatgptWorkspaceID: string;
+  readonly developerInstructions: string;
+  /** The instruction files the owner approved; Codex may load these and nothing else. */
+  readonly approvedInstructionSources: ReadonlyArray<{
+    readonly path: string;
+    readonly sha256: string;
+  }>;
+}
+
 // Supplied only by a future private Native admission/permission owner. There is no
 // JSON decoder, renderer endpoint, default profile supplier, or production layer.
 export interface PrivateNativeBindingSource {
@@ -60,6 +71,8 @@ export interface PrivateNativeBindingSource {
           ExecutionBindingError,
           Scope.Scope
         >;
+        /** Present exactly when the provider is Codex. */
+        readonly codex?: ManagedCodexRestrictions;
       }
     | undefined,
     ExecutionBindingError
@@ -72,6 +85,7 @@ export interface BoundCliExecution {
   readonly executablePath: string;
   readonly executableSHA256: string;
   readonly profile: PermittedCliProfile;
+  readonly codex?: ManagedCodexRestrictions;
 }
 
 export function executionObservationKey(receipt: ExecutionReceipt): ExecutionObservationKey {
@@ -91,6 +105,24 @@ export function executionObservationKey(receipt: ExecutionReceipt): ExecutionObs
 const absolute = (path: string) =>
   NodePath.isAbsolute(path) && NodePath.normalize(path) === path && !path.includes("\0");
 const environmentKeys = new Set(["PATH", "LANG", "LC_ALL", "TMPDIR"]);
+const MAXIMUM_DEVELOPER_INSTRUCTION_BYTES = 8 * 1024;
+const MAXIMUM_APPROVED_INSTRUCTION_SOURCES = 8;
+const utf8 = new TextEncoder();
+
+const validCodexRestrictions = (codex: ManagedCodexRestrictions | undefined) =>
+  codex !== undefined &&
+  /^[A-Za-z0-9_-]{1,256}$/.test(codex.chatgptWorkspaceID) &&
+  typeof codex.developerInstructions === "string" &&
+  codex.developerInstructions.trim().length > 0 &&
+  !codex.developerInstructions.includes("\0") &&
+  utf8.encode(codex.developerInstructions).length <= MAXIMUM_DEVELOPER_INSTRUCTION_BYTES &&
+  Array.isArray(codex.approvedInstructionSources) &&
+  codex.approvedInstructionSources.length <= MAXIMUM_APPROVED_INSTRUCTION_SOURCES &&
+  new Set(codex.approvedInstructionSources.map((source) => source.path)).size ===
+    codex.approvedInstructionSources.length &&
+  codex.approvedInstructionSources.every(
+    (source) => absolute(source.path) && /^[0-9a-f]{64}$/.test(source.sha256),
+  );
 
 export class ExecutionBinding extends Context.Service<
   ExecutionBinding,
@@ -143,7 +175,10 @@ export function makeExecutionBinding(
         saved.executable.profileRevision !== saved.profile.revision ||
         !absolute(saved.executable.path) ||
         !/^[0-9a-f]{64}$/.test(saved.executable.sha256) ||
-        !Effect.isEffect(saved.acquirePermittedProfile)
+        !Effect.isEffect(saved.acquirePermittedProfile) ||
+        (expected.provider === "codex"
+          ? !validCodexRestrictions(saved.codex)
+          : saved.codex !== undefined)
       )
         return yield* new ExecutionBindingError({ code: "retainedBindingMismatch" });
       const profile = yield* saved.acquirePermittedProfile;
@@ -169,6 +204,19 @@ export function makeExecutionBinding(
           ...profile,
           environment: Object.freeze({ ...profile.environment }),
         }),
+        ...(saved.codex
+          ? {
+              codex: Object.freeze({
+                chatgptWorkspaceID: saved.codex.chatgptWorkspaceID,
+                developerInstructions: saved.codex.developerInstructions,
+                approvedInstructionSources: Object.freeze(
+                  saved.codex.approvedInstructionSources.map((source) =>
+                    Object.freeze({ path: source.path, sha256: source.sha256 }),
+                  ),
+                ),
+              }),
+            }
+          : {}),
       };
     }),
   });

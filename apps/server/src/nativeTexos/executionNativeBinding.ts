@@ -1,6 +1,10 @@
 import * as Effect from "effect/Effect";
 
-import { ExecutionBindingError, type PrivateNativeBindingSource } from "./executionBinding.ts";
+import {
+  ExecutionBindingError,
+  type ManagedCodexRestrictions,
+  type PrivateNativeBindingSource,
+} from "./executionBinding.ts";
 import {
   decodeExecutionIntent,
   exact,
@@ -43,6 +47,26 @@ const strings = (value: unknown, keys: ReadonlyArray<string>) =>
  * Shape only: `ExecutionBinding.resolve` still checks the answer against the receipt, the
  * account and the profile, so a wrong but well-formed binding is refused there.
  */
+const decodeCodexRestrictions = (value: unknown): ManagedCodexRestrictions => {
+  const wire = exact(value, [
+    "chatgptWorkspaceID",
+    "developerInstructions",
+    "approvedInstructionSources",
+  ]);
+  const developerInstructions = wire.developerInstructions;
+  const sources = wire.approvedInstructionSources;
+  if (typeof developerInstructions !== "string" || !Array.isArray(sources) || sources.length > 8)
+    throw new Error("invalidNativeBinding");
+  return {
+    chatgptWorkspaceID: text(wire.chatgptWorkspaceID),
+    developerInstructions,
+    approvedInstructionSources: sources.map((source) => {
+      const fields = strings(source, ["path", "sha256"]);
+      return { path: fields.path!, sha256: fields.sha256! };
+    }),
+  };
+};
+
 export function decodeNativeBinding(value: unknown): Retained {
   const wire = exact(value, [
     "admission",
@@ -51,6 +75,9 @@ export function decodeNativeBinding(value: unknown): Retained {
     "profile",
     "executable",
     "model",
+    ...(typeof value === "object" && value !== null && Object.hasOwn(value, "codex")
+      ? ["codex"]
+      : []),
   ]);
   const admission = exact(wire.admission, [...KEY_FIELDS, "intent"]);
   const key = Object.fromEntries(
@@ -124,6 +151,7 @@ export function decodeNativeBinding(value: unknown): Retained {
       profileDirectory: profile.profileDirectory!,
       environment: { ...(environment as Record<string, string>) },
     }),
+    ...(wire.codex === undefined ? {} : { codex: decodeCodexRestrictions(wire.codex) }),
   };
 }
 

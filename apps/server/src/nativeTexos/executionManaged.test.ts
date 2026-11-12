@@ -54,6 +54,11 @@ import {
 } from "./executionProtocol.ts";
 import * as Receipts from "./executionReceipts.ts";
 import {
+  MANAGED_CODEX_DISABLED_FEATURES,
+  managedCodexLaunchArgs,
+} from "./executionCodexProfile.ts";
+import {
+  syntheticCodexRestrictions,
   syntheticBinding,
   syntheticIntent,
   syntheticRequest,
@@ -132,17 +137,43 @@ const result: SDKMessage = {
   permission_denials: [],
 };
 
-function codexTranscript(intent: ExecutionIntent): CodexReplay.CodexAppServerReplayTranscript {
-  const turn = (status: "inProgress" | "completed") => ({
-    id: "controlled-native-turn",
-    items: [],
-    itemsView: "notLoaded",
-    status,
-    error: null,
-    startedAt: 1782622440,
-    completedAt: status === "completed" ? 1782622450 : null,
-    durationMs: null,
-  });
+/** The effective configuration a managed Codex launch reports through `config/read`. */
+function managedConfiguration(model: string) {
+  return {
+    model,
+    model_provider: "openai",
+    forced_login_method: "chatgpt",
+    cli_auth_credentials_store: "file",
+    forced_chatgpt_workspace_id: [syntheticCodexRestrictions.chatgptWorkspaceID],
+    approval_policy: "never",
+    sandbox_mode: "workspace-write",
+    sandbox_workspace_write: { network_access: false },
+    web_search: "disabled",
+    project_doc_max_bytes: 0,
+    project_doc_fallback_filenames: [],
+    notify: [],
+    allow_login_shell: false,
+    history: { persistence: "none" },
+    analytics: { enabled: false },
+    agents: { enabled: false },
+    tools: { experimental_request_user_input: { enabled: false } },
+    include_permissions_instructions: false,
+    include_collaboration_mode_instructions: false,
+    include_environment_context: false,
+    skills: { include_instructions: false, bundled: { enabled: false } },
+    orchestrator: { skills: { enabled: false } },
+    mcp_servers: {},
+    model_providers: {},
+    features: Object.fromEntries(MANAGED_CODEX_DISABLED_FEATURES.map((name) => [name, false])),
+  };
+}
+
+type CodexFault = "configuration" | "approvalRequest";
+
+function codexTranscript(
+  intent: ExecutionIntent,
+  fault?: CodexFault,
+): CodexReplay.CodexAppServerReplayTranscript {
   return {
     provider: "codex",
     protocol: "codex.app-server",
@@ -188,6 +219,7 @@ function codexTranscript(intent: ExecutionIntent): CodexReplay.CodexAppServerRep
             cwd: intent.worktree.root,
             model: intent.configuration.modelID,
             config: CodexAdapter.CODEX_THREAD_CONFIG,
+            developerInstructions: syntheticCodexRestrictions.developerInstructions,
           },
         },
       },
@@ -222,7 +254,7 @@ function codexTranscript(intent: ExecutionIntent): CodexReplay.CodexAppServerRep
             serviceTier: null,
             cwd: intent.worktree.root,
             instructionSources: [],
-            approvalPolicy: "on-request",
+            approvalPolicy: "never",
             approvalsReviewer: "user",
             sandbox: {
               type: "workspaceWrite",
@@ -237,60 +269,137 @@ function codexTranscript(intent: ExecutionIntent): CodexReplay.CodexAppServerRep
         type: "expect_outbound",
         frame: {
           id: 3,
-          method: "turn/start",
-          params: {
-            threadId: "controlled-native-thread",
-            input: [{ type: "text", text: intent.input }],
-            cwd: intent.worktree.root,
-            model: intent.configuration.modelID,
-            approvalPolicy: "on-request",
-            approvalsReviewer: "user",
-            sandboxPolicy: {
-              type: "workspaceWrite",
-              writableRoots: [intent.worktree.root],
-              networkAccess: false,
-              excludeTmpdirEnvVar: true,
-              excludeSlashTmp: true,
+          method: "config/read",
+          params: { cwd: intent.worktree.root, includeLayers: false },
+        },
+      },
+      {
+        type: "emit_inbound",
+        frame: {
+          id: 3,
+          result: {
+            config: {
+              ...managedConfiguration(intent.configuration.modelID),
+              ...(fault === "configuration"
+                ? {
+                    features: {
+                      ...managedConfiguration(intent.configuration.modelID).features,
+                      shell_tool: true,
+                    },
+                  }
+                : {}),
             },
-            summary: "detailed",
-            collaborationMode: {
-              mode: "default",
-              settings: { model: intent.configuration.modelID },
-            },
+            origins: {},
           },
         },
       },
-      { type: "emit_inbound", frame: { id: 3, result: { turn: turn("inProgress") } } },
-      {
-        type: "emit_inbound",
-        label: "edit",
-        frame: {
-          method: "turn/started",
-          params: { threadId: "controlled-native-thread", turn: turn("inProgress") },
-        },
-      },
-      {
-        type: "emit_inbound",
-        frame: {
-          method: "item/completed",
-          params: {
-            threadId: "controlled-native-thread",
-            turnId: "controlled-native-turn",
-            completedAtMs: 2,
-            item: { type: "agentMessage", id: "answer-item", text: CODEX_ANSWER },
-          },
-        },
-      },
-      {
-        type: "emit_inbound",
-        frame: {
-          method: "turn/completed",
-          params: { threadId: "controlled-native-thread", turn: turn("completed") },
-        },
-      },
-      { type: "runtime_exit", status: "success" },
+      ...(fault === "configuration"
+        ? []
+        : ([
+            {
+              type: "expect_outbound",
+              frame: { id: 4, method: "mcpServerStatus/list", params: { limit: 256 } },
+            },
+            { type: "emit_inbound", frame: { id: 4, result: { data: [], nextCursor: null } } },
+            ...codexTurn(intent, fault),
+          ] as const)),
     ],
   };
+}
+
+function codexTurn(
+  intent: ExecutionIntent,
+  fault: CodexFault | undefined,
+): CodexReplay.CodexAppServerReplayTranscript["entries"] {
+  const turn = (status: "inProgress" | "completed") => ({
+    id: "controlled-native-turn",
+    items: [],
+    itemsView: "notLoaded",
+    status,
+    error: null,
+    startedAt: 1782622440,
+    completedAt: status === "completed" ? 1782622450 : null,
+    durationMs: null,
+  });
+  const started = { threadId: "controlled-native-thread", turn: turn("inProgress") };
+  return [
+    {
+      type: "expect_outbound",
+      frame: {
+        id: 5,
+        method: "turn/start",
+        params: {
+          threadId: "controlled-native-thread",
+          input: [{ type: "text", text: intent.input }],
+          cwd: intent.worktree.root,
+          model: intent.configuration.modelID,
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          sandboxPolicy: {
+            type: "workspaceWrite",
+            writableRoots: [intent.worktree.root],
+            networkAccess: false,
+            excludeTmpdirEnvVar: true,
+            excludeSlashTmp: true,
+          },
+          summary: "detailed",
+          collaborationMode: {
+            mode: "default",
+            settings: { model: intent.configuration.modelID },
+          },
+        },
+      },
+    },
+    { type: "emit_inbound", frame: { id: 5, result: { turn: turn("inProgress") } } },
+    ...(fault === "approvalRequest"
+      ? ([
+          { type: "emit_inbound", frame: { method: "turn/started", params: started } },
+          {
+            type: "emit_inbound",
+            frame: {
+              id: 77,
+              method: "item/fileChange/requestApproval",
+              params: {
+                threadId: "controlled-native-thread",
+                turnId: "controlled-native-turn",
+                itemId: "synthetic-patch",
+                reason: "Synthetic write outside the folder",
+              },
+            },
+          },
+          {
+            type: "expect_outbound",
+            frame: { id: 77, error: { code: -32001, message: "Refused by native execution" } },
+          },
+        ] as const)
+      : ([
+          {
+            type: "emit_inbound",
+            label: "edit",
+            frame: { method: "turn/started", params: started },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              method: "item/completed",
+              params: {
+                threadId: "controlled-native-thread",
+                turnId: "controlled-native-turn",
+                completedAtMs: 2,
+                item: { type: "agentMessage", id: "answer-item", text: CODEX_ANSWER },
+              },
+            },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              method: "turn/completed",
+              params: { threadId: "controlled-native-thread", turn: turn("completed") },
+            },
+          },
+          { type: "runtime_exit", status: "success" },
+        ] as const)),
+  ];
 }
 
 const CODEX_ANSWER = 'Wrote answer.ts: "42" 😀';
@@ -318,7 +427,8 @@ const setup = Effect.fn("ManagedExecutionTest.setup")(function* (
     | "profile"
     | "executable"
     | "stream"
-    | "interrupt",
+    | "interrupt"
+    | CodexFault,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const temporary = yield* fs.makeTempDirectoryScoped({ prefix: "texos-managed-" });
@@ -390,6 +500,7 @@ const setup = Effect.fn("ManagedExecutionTest.setup")(function* (
             profileRevision: "1",
           },
           model: { id: intent.configuration.modelID, provider },
+          ...(provider === "codex" ? { codex: syntheticCodexRestrictions } : {}),
           acquirePermittedProfile:
             fault === "profile"
               ? Effect.fail(new ExecutionBindingError({ code: "profileAccessDenied" }))
@@ -432,12 +543,18 @@ const setup = Effect.fn("ManagedExecutionTest.setup")(function* (
           assert.equal(input.settings.setupMode, "existing");
           assert.equal(input.settings.homePath, profileDirectory);
           assert.equal(input.settings.binaryPath, NodePath.join(root, "not-an-executable"));
-          assert.equal(input.settings.launchArgs, "");
+          assert.equal(
+            input.settings.launchArgs,
+            managedCodexLaunchArgs(intent.configuration.modelID, syntheticCodexRestrictions),
+          );
           assert.deepEqual(input.environment, {
             HOME: homeDirectory,
             CODEX_HOME: profileDirectory,
           });
-          const transcript = codexTranscript(intent);
+          const transcript = codexTranscript(
+            intent,
+            fault === "configuration" || fault === "approvalRequest" ? fault : undefined,
+          );
           const driver = yield* CodexReplay.makeReplayDriver(transcript, {
             beforeEmitInbound: (entry) =>
               entry.label === "edit" ? edit().pipe(Effect.orDie) : Effect.void,
@@ -641,6 +758,27 @@ describe("control through private binding and actual managed lower adapters", ()
         assert.notEqual(f.managed.observation(f.intent.commandID)?.outcome, "completed");
       }).pipe(Effect.scoped, Effect.provide(layers)),
   );
+  it.effect.each(["configuration", "approvalRequest"] as const)(
+    "a managed Codex run refused for %s never settles and leaves the file alone",
+    (fault) =>
+      Effect.gen(function* () {
+        const f = yield* setup("codex", fault);
+        const control = yield* makeExecutionControl(syntheticBinding).pipe(
+          Effect.provideService(ManagedExecutionProvider, f.managed),
+        );
+        yield* control.handle(syntheticRequest("execution.admit", f.intent), f.authorize);
+        yield* control.awaitAttempt(f.intent.commandID);
+        const saved = yield* f.stored;
+        assert.equal(yield* f.readAnswer, "export const answer = 0;\n");
+        assert.equal(f.counts().edits, 0);
+        assert.equal(f.counts().opens, 1);
+        assert.equal(saved?.phase, "uncertain");
+        assert.isUndefined(saved?.finish);
+        assert.notEqual(f.managed.observation(f.intent.commandID)?.outcome, "completed");
+        if (fault === "configuration") assert.isUndefined(saved?.mappings.providerTurnID);
+      }).pipe(Effect.scoped, Effect.provide(layers)),
+  );
+
   it.effect.each(["codex", "claudeCode"] as const)(
     "%s edits once through its actual adapter; only an owned drain proof settles the attempt",
     (provider) =>

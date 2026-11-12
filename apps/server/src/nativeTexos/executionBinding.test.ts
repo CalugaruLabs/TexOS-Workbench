@@ -8,7 +8,7 @@ import {
 } from "./executionBinding.ts";
 import { executionEnvelope } from "./executionProtocol.ts";
 import type { ExecutionReceipt } from "./executionReceipts.ts";
-import { syntheticIntent } from "./execution.testkit.ts";
+import { syntheticCodexRestrictions, syntheticIntent } from "./execution.testkit.ts";
 
 function fixture() {
   const intent = syntheticIntent("/synthetic/repository");
@@ -60,6 +60,12 @@ function fixture() {
         environment: {},
       };
     }),
+    codex: {
+      ...syntheticCodexRestrictions,
+      approvedInstructionSources: [
+        { path: "/synthetic/profile/AGENTS.md", sha256: "2".repeat(64) },
+      ],
+    },
   };
   const source: PrivateNativeBindingSource = {
     readRetained: () =>
@@ -85,6 +91,8 @@ describe("private retained execution binding", () => {
         assert.equal(resolved.profile.profileID, f.retained.profile.id);
         assert.equal(resolved.executablePath, f.retained.executable.path);
         assert.isTrue(Object.isFrozen(resolved.profile.environment));
+        assert.deepEqual(resolved.codex, f.retained.codex);
+        assert.isTrue(Object.isFrozen(resolved.codex?.approvedInstructionSources));
       }).pipe(Effect.scoped),
   );
 
@@ -119,6 +127,12 @@ describe("private retained execution binding", () => {
     "executable",
     "model",
     "tokenRoute",
+    "codexMissing",
+    "workspace",
+    "developerInstructions",
+    "instructionPath",
+    "instructionDuplicate",
+    "instructionCount",
   ] as const)("denies retained %s mismatch before profile access", (kind) =>
     Effect.gen(function* () {
       const f = fixture();
@@ -158,6 +172,32 @@ describe("private retained execution binding", () => {
           break;
         case "tokenRoute":
           Object.assign(f.retained.account, { route: "t3-managed-token-sharing" });
+          break;
+        case "codexMissing":
+          Object.assign(f.retained, { codex: undefined });
+          break;
+        case "workspace":
+          f.retained.codex.chatgptWorkspaceID = 'workspace" --config web_search="live';
+          break;
+        case "developerInstructions":
+          f.retained.codex.developerInstructions = "x".repeat(8 * 1024 + 1);
+          break;
+        case "instructionPath":
+          f.retained.codex.approvedInstructionSources = [
+            { path: "AGENTS.md", sha256: "2".repeat(64) },
+          ];
+          break;
+        case "instructionDuplicate":
+          f.retained.codex.approvedInstructionSources = [
+            ...f.retained.codex.approvedInstructionSources,
+            ...f.retained.codex.approvedInstructionSources,
+          ];
+          break;
+        case "instructionCount":
+          f.retained.codex.approvedInstructionSources = Array.from({ length: 9 }, (_, index) => ({
+            path: `/synthetic/profile/AGENTS-${index}.md`,
+            sha256: "2".repeat(64),
+          }));
           break;
       }
       const error = yield* makeExecutionBinding(f.source).resolve(f.receipt).pipe(Effect.flip);

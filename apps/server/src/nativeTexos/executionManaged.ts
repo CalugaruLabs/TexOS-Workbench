@@ -20,6 +20,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as CodexError from "effect-codex-app-server/errors";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -114,17 +115,10 @@ const sha256OfFile = async (handle: NodeFSP.FileHandle) => {
  * identity is unchanged, but only once its last change is older than the timestamp
  * granularity can blur: a rewrite in the same tick could otherwise keep the old ctime.
  */
-export const makeExecutableCheck = ({
-  hashFile = sha256OfFile,
-  now = () => Date.now(),
-}: {
-  readonly hashFile?: (handle: NodeFSP.FileHandle) => Promise<string>;
-  readonly now?: () => number;
-} = {}) => {
+export const makeExecutableCheck = (hashFile = sha256OfFile) => {
   const verified = new Map<string, string>();
-  return async (path: string, sha256: string) => {
+  return async (path: string, sha256: string, checkedAtMs: number) => {
     if ((await NodeFSP.realpath(path)) !== path) throw new Error("linkedExecutable");
-    const checkedAt = now();
     const handle = await NodeFSP.open(
       path,
       NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW,
@@ -138,7 +132,7 @@ export const makeExecutableCheck = ({
       if (verified.get(path) === identity) return;
       verified.delete(path);
       if ((await hashFile(handle)) !== sha256) throw new Error("changedExecutable");
-      if (Number(stat.ctimeMs) < checkedAt - 2_000) verified.set(path, identity);
+      if (Number(stat.ctimeMs) < checkedAtMs - 2_000) verified.set(path, identity);
     } finally {
       await handle.close();
     }
@@ -229,10 +223,19 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
               yield* Effect.addFinalizer(() => Scope.close(ownedScope, Exit.void));
               const intent = receipt.intent;
               const root = intent.worktree.root;
-              const checkExecutable = Effect.tryPromise({
-                try: () => checkExecutableFile(bound.executablePath, bound.executableSHA256),
-                catch: () => new ExecutionControlError({ code: "managedExecutableChanged" }),
-              });
+              const checkExecutable = Clock.currentTimeMillis.pipe(
+                Effect.flatMap((checkedAtMs) =>
+                  Effect.tryPromise({
+                    try: () =>
+                      checkExecutableFile(
+                        bound.executablePath,
+                        bound.executableSHA256,
+                        checkedAtMs,
+                      ),
+                    catch: () => new ExecutionControlError({ code: "managedExecutableChanged" }),
+                  }),
+                ),
+              );
               yield* checkExecutable;
               const checkedStart = beforeProviderStart.pipe(
                 Effect.andThen(checkExecutable),

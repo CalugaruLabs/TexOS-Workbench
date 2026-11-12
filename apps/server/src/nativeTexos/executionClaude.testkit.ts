@@ -41,7 +41,7 @@ export const CLAUDE_FIXTURE_CURSORS = [
   "00000000-0000-4000-8000-000000000201",
   "00000000-0000-4000-8000-000000000202",
 ] as const;
-export const CLAUDE_FIXTURE_MODEL = "claude-sonnet-4-6";
+const CLAUDE_FIXTURE_MODEL = "claude-sonnet-4-6";
 export const INITIAL_ANSWER = "export const answer = 0;\n";
 export const EDITED_ANSWER = "export const answer = 42;\n";
 

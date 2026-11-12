@@ -835,27 +835,25 @@ describe("managed executable check", () => {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }
   };
-  const countingCheck = (now?: () => number) => {
+  const countingCheck = () => {
     let hashes = 0;
-    const check = makeExecutableCheck({
-      hashFile: async (handle) => {
-        hashes++;
-        return sha256(String(await handle.readFile()));
-      },
-      ...(now ? { now } : {}),
+    const check = makeExecutableCheck(async (handle) => {
+      hashes++;
+      return sha256(String(await handle.readFile()));
     });
     return { check, hashes: () => hashes };
   };
 
   it("hashes a settled executable once and still refuses a changed one", async () => {
     await withExecutable(async (path) => {
-      const f = countingCheck(() => Number.MAX_SAFE_INTEGER);
-      await f.check(path, sha256("first build"));
-      await f.check(path, sha256("first build"));
+      const f = countingCheck();
+      const later = Number.MAX_SAFE_INTEGER;
+      await f.check(path, sha256("first build"), later);
+      await f.check(path, sha256("first build"), later);
       assert.equal(f.hashes(), 1);
       await NodeFSP.writeFile(path, "a longer second build");
       assert.equal(
-        await f.check(path, sha256("first build")).then(
+        await f.check(path, sha256("first build"), later).then(
           () => "accepted",
           () => "refused",
         ),
@@ -868,10 +866,11 @@ describe("managed executable check", () => {
   it("hashes a just-changed executable every time, so a same-size rewrite is caught", async () => {
     await withExecutable(async (path) => {
       const f = countingCheck();
-      await f.check(path, sha256("first build"));
+      const changedAt = async () => (await NodeFSP.stat(path)).ctimeMs;
+      await f.check(path, sha256("first build"), await changedAt());
       await NodeFSP.writeFile(path, "other build");
       assert.equal(
-        await f.check(path, sha256("first build")).then(
+        await f.check(path, sha256("first build"), await changedAt()).then(
           () => "accepted",
           () => "refused",
         ),

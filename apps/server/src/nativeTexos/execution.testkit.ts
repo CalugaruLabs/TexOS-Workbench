@@ -5,6 +5,12 @@ import type {
   NativeExecutionAuthorization,
 } from "./executionProtocol.ts";
 import { decodeExecutionHostRequest, executionEnvelope } from "./executionProtocol.ts";
+import * as Effect from "effect/Effect";
+import Migration070 from "../persistence/Migrations/070_NativeExecutionReceipts.ts";
+import Migration071 from "../persistence/Migrations/071_NativeExecutionOutcomes.ts";
+
+/** The receipt tables as T3 builds them today. */
+export const executionReceiptMigrations = Migration070.pipe(Effect.andThen(Migration071));
 
 export const syntheticBinding: ExecutionChannelBinding = {
   authorityID: "synthetic-authority",

@@ -2,12 +2,14 @@ import { describe, expect, it } from "@effect/vitest";
 import { decodePersonalAgentCommand } from "@t3tools/shared/personalAgents";
 import { nativeCommandProblem, nativeHttpAllowed, nativeRpcAllowed } from "./profile.ts";
 import {
+  ANSWER_PAGE_BYTES,
+  answerPage,
   decodeExecutionHostRequest,
   executionEnvelope,
   EXECUTION_CAPABILITY,
   MANAGED_EXECUTION_CAPABILITY,
 } from "./executionProtocol.ts";
-import { syntheticIntent, unicodeCanonicalFixture } from "./execution.testkit.ts";
+import { syntheticIntent, syntheticRequest, unicodeCanonicalFixture } from "./execution.testkit.ts";
 
 describe("private execution envelope", () => {
   it("adds managed capability without changing controlled capability or granting renderer access", () => {
@@ -122,5 +124,58 @@ describe("private execution envelope", () => {
       decodeExecutionHostRequest({ ...request, method: "execution.authorizeStart" }),
     ).toThrow();
     expect(() => decodeExecutionHostRequest({ ...request, permissionGranted: true })).toThrow();
+  });
+});
+
+describe("answer pages and reconcile on the wire", () => {
+  const command = {
+    commandID: "00000000-0000-4000-8000-000000000001",
+    envelopeDigest: "a".repeat(64),
+  };
+
+  it("accepts a status text offset and reconcile, and refuses a bad offset", () => {
+    expect(syntheticRequest("execution.status", { ...command, textOffset: 12 }).params).toEqual({
+      ...command,
+      textOffset: 12,
+    });
+    expect(syntheticRequest("execution.status", command).params).toEqual(command);
+    expect(syntheticRequest("execution.reconcile", command).method).toBe("execution.reconcile");
+    for (const textOffset of [-1, 1.5, "3", Number.MAX_SAFE_INTEGER + 1])
+      expect(() => syntheticRequest("execution.status", { ...command, textOffset })).toThrow();
+    expect(() => syntheticRequest("execution.stop", { ...command, textOffset: 0 })).toThrow();
+    expect(() => syntheticRequest("execution.reconcile", { ...command, textOffset: 0 })).toThrow();
+  });
+
+  it("pages by code point, keeps escaped pages inside the frame budget, and rebuilds the text", () => {
+    const text = `${"\u0000".repeat(20_000)}😀${"é".repeat(30_000)}"\\`;
+    const pages = [];
+    let offset = 0;
+    for (;;) {
+      const page = answerPage(text, offset, true, false);
+      expect(page.offset).toBe(offset);
+      expect(new TextEncoder().encode(JSON.stringify(page.text)).length - 2).toBeLessThanOrEqual(
+        ANSWER_PAGE_BYTES,
+      );
+      pages.push(page.text);
+      if (page.nextOffset === page.total) break;
+      expect(page.nextOffset).toBeGreaterThan(offset);
+      offset = page.nextOffset;
+    }
+    expect(pages.length).toBeGreaterThan(2);
+    expect(pages.join("")).toBe(text);
+    expect(answerPage(text, 20_000, false, true)).toMatchObject({
+      offset: 20_000,
+      final: false,
+      truncated: true,
+    });
+    expect(answerPage(text, 20_000, false, true).text.startsWith("😀é")).toBe(true);
+    expect(answerPage("abc", 99, true, false)).toEqual({
+      offset: 3,
+      text: "",
+      nextOffset: 3,
+      total: 3,
+      final: true,
+      truncated: false,
+    });
   });
 });

@@ -26,7 +26,6 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import type { Done } from "effect/Cause";
 import * as ServerConfig from "../config.ts";
-import Migration from "../persistence/Migrations/070_NativeExecutionReceipts.ts";
 import * as CodexAdapter from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ClaudeAdapter from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { makeReplayServerConfig } from "../orchestration-v2/Adapters/CodexAdapterV2.testkit.ts";
@@ -59,6 +58,7 @@ import {
   syntheticIntent,
   syntheticRequest,
   syntheticAuthorization,
+  executionReceiptMigrations as Migration,
 } from "./execution.testkit.ts";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", async (importOriginal) => ({
@@ -272,6 +272,18 @@ function codexTranscript(intent: ExecutionIntent): CodexReplay.CodexAppServerRep
       {
         type: "emit_inbound",
         frame: {
+          method: "item/completed",
+          params: {
+            threadId: "controlled-native-thread",
+            turnId: "controlled-native-turn",
+            completedAtMs: 2,
+            item: { type: "agentMessage", id: "answer-item", text: CODEX_ANSWER },
+          },
+        },
+      },
+      {
+        type: "emit_inbound",
+        frame: {
           method: "turn/completed",
           params: { threadId: "controlled-native-thread", turn: turn("completed") },
         },
@@ -280,6 +292,8 @@ function codexTranscript(intent: ExecutionIntent): CodexReplay.CodexAppServerRep
     ],
   };
 }
+
+const CODEX_ANSWER = 'Wrote answer.ts: "42" 😀';
 
 const database = Layer.mergeAll(
   NodeSqliteClient.layer({ filename: ":memory:" }),
@@ -662,6 +676,12 @@ describe("control through private binding and actual managed lower adapters", ()
         assert.equal(f.outcomes[0]?.drained, proven);
         assert.equal(saved?.phase, proven ? "attemptFinished" : "uncertain");
         assert.equal(saved?.drained, proven);
+        if (proven)
+          assert.deepEqual(saved?.finish, {
+            outcome: "completed",
+            answer: { text: CODEX_ANSWER, truncated: false },
+          });
+        else assert.isUndefined(saved?.finish);
         assert.isString(saved?.mappings.providerThreadID);
         assert.isString(saved?.mappings.providerTurnID);
         const observation = f.managed.observation(f.intent.commandID);

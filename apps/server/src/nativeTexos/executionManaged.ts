@@ -42,7 +42,7 @@ import {
   type BoundCliExecution,
 } from "./executionBinding.ts";
 import { ExecutionControlError, type ControlledExecutionAttempt } from "./executionControl.ts";
-import type * as Receipts from "./executionReceipts.ts";
+import * as Receipts from "./executionReceipts.ts";
 import type { ManagedExecutionObservation } from "./executionProtocol.ts";
 import { ManagedRunReadModel } from "./executionReadModel.ts";
 import { validateExecutionWorktree } from "./executionWorktree.ts";
@@ -100,6 +100,8 @@ export class ManagedExecutionProvider extends Context.Service<
       ) => Effect.Effect<void, ExecutionControlError>,
     ) => Effect.Effect<ControlledExecutionAttempt, ExecutionControlError>;
     readonly observation: (commandID: string) => ManagedExecutionObservation | undefined;
+    /** The answer so far of a run still in this process; a finished run's lives on its receipt. */
+    readonly answer: (commandID: string) => string | undefined;
   }
 >()("t3/nativeTexos/executionManaged/ManagedExecutionProvider") {}
 
@@ -155,6 +157,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const observations = new Map<string, ManagedExecutionObservation>();
+  const answers = new Map<string, string>();
   const checkExecutableFile = makeExecutableCheck();
   const supports = (provider: "codex" | "claudeCode") =>
     bindings.available &&
@@ -165,6 +168,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
       bindings.available && (transports?.codex !== undefined || transports?.claude !== undefined),
     supports,
     observation: (id) => observations.get(id),
+    answer: (id) => answers.get(id),
     create: Effect.fn("ManagedExecutionProvider.create")(
       function* (receipt, beforeProviderStart, recordMappings) {
         if (!supports(receipt.intent.configuration.provider))
@@ -179,6 +183,8 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
           | undefined;
         let providerTurnID: Receipts.ExecutionMappings["providerTurnID"];
         let stopping = false;
+        // The answer is the run's assistant messages in the order they began, a blank line apart.
+        const assistantMessages = new Map<string, string>();
         const observation: ManagedExecutionObservation = {
           key: executionObservationKey(receipt),
           outcome: "unknown",
@@ -503,6 +509,15 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                 event: ProviderAdapter.ProviderAdapterV2Event,
               ) {
                 yield* readModel.ingest(event);
+                if (
+                  event.type === "message.updated" &&
+                  event.message.role === "assistant" &&
+                  event.message.threadId === threadId &&
+                  event.message.runId === intent.canonicalRunID
+                ) {
+                  assistantMessages.set(event.message.id, event.message.text);
+                  answers.set(intent.commandID, [...assistantMessages.values()].join("\n\n"));
+                }
                 if (event.type === "provider_turn.updated") {
                   const turn = event.providerTurn;
                   if (
@@ -628,13 +643,26 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
               // Only an owned prefix proof counts; the legacy queue never reaches EOF.
               if (eventStreamSucceeded && ownedConsumer) publish({ adapterEventDrain: "observed" });
               const final = observations.get(intent.commandID)!;
+              const outcome = final.outcome;
+              const drained =
+                outcome !== "unknown" &&
+                final.closeAndJoin === "observed" &&
+                final.transportAndParserDrain === "observed" &&
+                final.adapterEventDrain === "observed";
               return {
                 mappings,
-                drained:
-                  final.outcome !== "unknown" &&
-                  final.closeAndJoin === "observed" &&
-                  final.transportAndParserDrain === "observed" &&
-                  final.adapterEventDrain === "observed",
+                drained,
+                ...(drained
+                  ? {
+                      finish: {
+                        outcome,
+                        answer: Receipts.boundedAnswer({
+                          text: answers.get(intent.commandID) ?? "",
+                          truncated: false,
+                        }),
+                      },
+                    }
+                  : {}),
               };
             }),
           ).pipe(

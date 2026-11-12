@@ -22,6 +22,8 @@ function fixture() {
     phase: "running",
     mappings: {},
     drained: false,
+    hostGeneration: "generation-1",
+    finish: undefined,
   };
   let reads = 0;
   let accesses = 0;

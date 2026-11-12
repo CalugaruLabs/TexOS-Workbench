@@ -10,6 +10,7 @@ import * as Semaphore from "effect/Semaphore";
 import {
   EXECUTION_CAPABILITY,
   MANAGED_EXECUTION_CAPABILITY,
+  answerPage,
   decodeNativeAuthorization,
   executionEnvelope,
   type ExecutionChannelBinding,
@@ -34,8 +35,13 @@ export type NativeStartAuthorizer = (
 ) => Promise<unknown>;
 
 export interface ControlledExecutionAttempt {
+  /** A drained run reports how it ended and its answer; without both it is uncertain. */
   readonly run: Effect.Effect<
-    { readonly mappings: Receipts.ExecutionMappings; readonly drained: boolean },
+    {
+      readonly mappings: Receipts.ExecutionMappings;
+      readonly drained: boolean;
+      readonly finish?: Receipts.ExecutionFinish;
+    },
     ExecutionControlError
   >;
   readonly stop: Effect.Effect<void, ExecutionControlError>;
@@ -70,13 +76,20 @@ export function executionReceiptView(receipt: Receipts.ExecutionReceipt) {
     phase: receipt.phase,
     mappings: receipt.mappings,
     drained: receipt.drained,
+    outcome: receipt.finish?.outcome ?? null,
     reconciliationRequired: receipt.phase === "uncertain",
   };
 }
 
+const stoppedBeforeStart: Receipts.ExecutionFinish = {
+  outcome: "interrupted",
+  answer: { text: "", truncated: false },
+};
+
 type ReceiptView = ReturnType<typeof executionReceiptView>;
 export type ExecutionControlResult =
   | ReceiptView
+  | (ReceiptView & { readonly answer: ReturnType<typeof answerPage> })
   | { readonly capabilities: readonly string[]; readonly runtimeID?: string }
   | {
       readonly commandID: string;
@@ -212,7 +225,7 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
           const saved = yield* current(item);
           if (item.stopRequested || closed) {
             if (saved.phase === "stopping")
-              item.receipt = yield* receipts.transition(saved, "stopped", {}, true);
+              item.receipt = yield* receipts.transition(saved, "stopped", {}, stoppedBeforeStart);
             return false;
           }
           item.receipt = yield* receipts.transition(saved, "starting");
@@ -251,15 +264,12 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
         Effect.gen(function* () {
           const latest = yield* current(item);
           if (latest.phase === "uncertain") return;
+          const finish = outcome.drained ? outcome.finish : undefined;
           item.receipt = yield* receipts.transition(
             latest,
-            outcome.drained
-              ? latest.phase === "stopping"
-                ? "stopped"
-                : "attemptFinished"
-              : "uncertain",
+            finish ? (latest.phase === "stopping" ? "stopped" : "attemptFinished") : "uncertain",
             outcome.mappings,
-            outcome.drained,
+            finish,
           );
         }),
       );
@@ -286,7 +296,7 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
                   predecessor,
                   phase,
                   {},
-                  phase === "stopped",
+                  phase === "stopped" ? stoppedBeforeStart : undefined,
                 );
               }),
             )
@@ -353,6 +363,35 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
             );
           return executionReceiptView(item.receipt);
         }
+        if (request.method === "execution.reconcile") {
+          if (live.has(saved.intent.commandID))
+            return yield* new ExecutionControlError({ code: "executionNotAbandonable" });
+          return executionReceiptView(
+            yield* receipts.abandon(
+              saved.intent.commandID,
+              saved.envelopeDigest,
+              binding.authorityID,
+              binding.hostGeneration,
+            ),
+          );
+        }
+        if (request.method === "execution.status") {
+          const text =
+            saved.finish?.answer.text ??
+            (provider?.mode === "managed-cli-subscription"
+              ? provider.answer(saved.intent.commandID)
+              : undefined) ??
+            "";
+          return {
+            ...executionReceiptView(saved),
+            answer: answerPage(
+              text,
+              request.params.textOffset ?? 0,
+              saved.finish !== undefined,
+              saved.finish?.answer.truncated ?? false,
+            ),
+          };
+        }
         return executionReceiptView(saved);
       }
       const envelope = yield* Effect.try({
@@ -378,7 +417,7 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
         return yield* new ExecutionControlError({ code: "managedRouteUnavailable" });
       if (live.size !== 0 || (yield* receipts.hasUnresolved))
         return yield* new ExecutionControlError({ code: "executionCapacityOccupied" });
-      const admitted = yield* receipts.admit(intent);
+      const admitted = yield* receipts.admit(intent, binding.hostGeneration);
       if (!admitted.created) return executionReceiptView(admitted.receipt);
       const item: LiveAttempt = {
         receipt: admitted.receipt,

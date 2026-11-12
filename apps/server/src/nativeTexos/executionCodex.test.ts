@@ -11,7 +11,6 @@ import * as Layer from "effect/Layer";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import Migration from "../persistence/Migrations/070_NativeExecutionReceipts.ts";
 import * as Receipts from "./executionReceipts.ts";
 import { ControlledExecutionProvider, makeExecutionControl } from "./executionControl.ts";
 import { executionEnvelope, type ExecutionIntent } from "./executionProtocol.ts";
@@ -20,6 +19,7 @@ import {
   syntheticIntent,
   syntheticRequest,
   syntheticAuthorization,
+  executionReceiptMigrations as Migration,
 } from "./execution.testkit.ts";
 import { makeControlledCodexFixture, currentReceiptAuthorizer } from "./executionCodex.testkit.ts";
 import type { NativeStartAuthorizer } from "./executionControl.ts";
@@ -207,6 +207,17 @@ describe("native execution with the actual lower Codex adapter", () => {
         );
         assert.propertyVal(finished, "phase", "attemptFinished");
         assert.propertyVal(finished, "drained", true);
+        assert.propertyVal(finished, "outcome", "completed");
+        assert.ok("answer" in finished);
+        const { answer, ...finishedView } = finished;
+        assert.deepEqual(answer, {
+          offset: 0,
+          text: "Controlled fixture answer.",
+          nextOffset: 26,
+          total: 26,
+          final: true,
+          truncated: false,
+        });
         assert.propertyVal(finished, "canonicalAttemptID", intent.canonicalAttemptID);
         assert.propertyVal(finished, "workerRequestID", intent.workerRequestID);
         assert.equal(factoryCalls, 1);
@@ -219,7 +230,7 @@ describe("native execution with the actual lower Codex adapter", () => {
           syntheticRequest("execution.admit", intent, 12),
           authorize,
         );
-        assert.deepEqual(duplicateAfterResult, finished);
+        assert.deepEqual(duplicateAfterResult, finishedView);
         assert.equal(factoryCalls, 1);
       }).pipe(
         Effect.scoped,

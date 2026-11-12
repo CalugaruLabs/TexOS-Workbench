@@ -91,7 +91,16 @@ export type ExecutionHostRequest = Frame & {
     | { readonly method: "execution.hello"; readonly params: { readonly capabilities: string[] } }
     | { readonly method: "execution.admit"; readonly params: ExecutionIntent }
     | {
-        readonly method: "execution.status" | "execution.stop";
+        readonly method: "execution.status";
+        readonly params: {
+          readonly commandID: string;
+          readonly envelopeDigest: string;
+          /** Code points of the answer TexOS already holds. */
+          readonly textOffset?: number;
+        };
+      }
+    | {
+        readonly method: "execution.stop" | "execution.reconcile";
         readonly params: { readonly commandID: string; readonly envelopeDigest: string };
       }
   );
@@ -331,8 +340,24 @@ export function decodeExecutionHostRequest(value: unknown): ExecutionHostRequest
     case "execution.admit":
       decodeExecutionIntent(frame.params);
       break;
-    case "execution.status":
-    case "execution.stop": {
+    case "execution.status": {
+      const params = exact(
+        frame.params,
+        Object.hasOwn(object(frame.params), "textOffset")
+          ? ["commandID", "envelopeDigest", "textOffset"]
+          : ["commandID", "envelopeDigest"],
+      );
+      uuid(params.commandID);
+      digestString(params.envelopeDigest);
+      if (
+        params.textOffset !== undefined &&
+        (!Number.isSafeInteger(params.textOffset) || Number(params.textOffset) < 0)
+      )
+        throw new ExecutionProtocolError("invalidExecutionTextOffset");
+      break;
+    }
+    case "execution.stop":
+    case "execution.reconcile": {
       const params = exact(frame.params, ["commandID", "envelopeDigest"]);
       uuid(params.commandID);
       digestString(params.envelopeDigest);
@@ -393,6 +418,35 @@ export function decodeNativeAuthorization(value: unknown): NativeExecutionAuthor
     throw new ExecutionProtocolError("invalidNativeAuthorization");
   }
   return result as unknown as NativeExecutionAuthorization;
+}
+
+// Leaves room in a 64 KiB frame for the receipt view around the page.
+export const ANSWER_PAGE_BYTES = 48 * 1024;
+const pageEncoder = new TextEncoder();
+
+/**
+ * A page of the answer from a code-point offset, sized by its JSON-encoded bytes so escapes
+ * can never push a frame past its limit. `final` means the text will not change again.
+ */
+export function answerPage(text: string, offset: number, final: boolean, truncated: boolean) {
+  const points = Array.from(text);
+  const start = Math.min(offset, points.length);
+  let bytes = 0;
+  let end = start;
+  while (end < points.length) {
+    const size = pageEncoder.encode(JSON.stringify(points[end])).length - 2;
+    if (bytes + size > ANSWER_PAGE_BYTES) break;
+    bytes += size;
+    end++;
+  }
+  return {
+    offset: start,
+    text: points.slice(start, end).join(""),
+    nextOffset: end,
+    total: points.length,
+    final,
+    truncated,
+  };
 }
 
 function canonicalJSON(value: unknown): string {

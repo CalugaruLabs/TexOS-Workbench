@@ -2,8 +2,11 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 
+import { isTexosMissionId } from "@t3tools/shared/texosMission";
+
 export const EXECUTION_NAMESPACE = "texos.execution";
 export const EXECUTION_CAPABILITY = "texos.execution.controlled-codex.v2";
+export const MANAGED_EXECUTION_CAPABILITY = "texos.execution.managed-cli.v2";
 export const AUTHORIZATION_CAPABILITY = "texos.execution.authorize.v2";
 export const EXECUTION_FRAME_BYTES = 64 * 1024;
 
@@ -33,6 +36,7 @@ export interface ExecutionConfiguration {
 export interface ExecutionIntent {
   readonly commandID: string;
   readonly canonicalRunID: string;
+  readonly canonicalTaskID: string;
   readonly canonicalAttemptID: string;
   readonly workerRequestID: string;
   readonly scope: ExecutionScope;
@@ -53,6 +57,28 @@ export interface ExecutionChannelBinding {
   readonly hostGeneration: string;
 }
 
+export interface ExecutionObservationKey {
+  readonly commandID: string;
+  readonly envelopeDigest: string;
+  readonly canonicalRunID: string;
+  readonly canonicalAttemptID: string;
+  readonly workerRequestID: string;
+  readonly runtimeID: string;
+  readonly childID: string;
+  readonly t3ThreadID: string;
+  readonly t3ProviderSessionID: string;
+}
+
+// Observations are not independent acceptance or authority to release a Native lease.
+export interface ManagedExecutionObservation {
+  readonly key: ExecutionObservationKey;
+  readonly outcome: "completed" | "failed" | "interrupted" | "unknown";
+  readonly closeAndJoin: "observed" | "unknown";
+  readonly transportAndParserDrain: "observed" | "unknown";
+  readonly adapterEventDrain: "observed" | "unknown";
+  readonly assistantCursor?: string;
+}
+
 interface Frame extends ExecutionChannelBinding {
   readonly version: 2;
   readonly namespace: typeof EXECUTION_NAMESPACE;
@@ -65,7 +91,16 @@ export type ExecutionHostRequest = Frame & {
     | { readonly method: "execution.hello"; readonly params: { readonly capabilities: string[] } }
     | { readonly method: "execution.admit"; readonly params: ExecutionIntent }
     | {
-        readonly method: "execution.status" | "execution.stop";
+        readonly method: "execution.status";
+        readonly params: {
+          readonly commandID: string;
+          readonly envelopeDigest: string;
+          /** Code points of the answer TexOS already holds. */
+          readonly textOffset?: number;
+        };
+      }
+    | {
+        readonly method: "execution.stop" | "execution.reconcile";
         readonly params: { readonly commandID: string; readonly envelopeDigest: string };
       }
   );
@@ -85,6 +120,14 @@ export interface ExecutionAuthorizationRequest extends Frame {
     readonly nativeThreadID?: string;
   };
 }
+
+export interface ExecutionBindingRequest extends Frame {
+  readonly kind: "request";
+  readonly method: "execution.readBinding";
+  readonly params: ExecutionObservationKey;
+}
+
+export type ExecutionNativeRequest = ExecutionAuthorizationRequest | ExecutionBindingRequest;
 
 export interface NativeExecutionAuthorization {
   readonly decisionID: string;
@@ -180,6 +223,7 @@ export function decodeExecutionIntent(value: unknown): ExecutionIntent {
   const intent = exact(value, [
     "commandID",
     "canonicalRunID",
+    "canonicalTaskID",
     "canonicalAttemptID",
     "workerRequestID",
     "scope",
@@ -191,6 +235,14 @@ export function decodeExecutionIntent(value: unknown): ExecutionIntent {
   uuid(intent.commandID);
   for (const key of ["canonicalRunID", "canonicalAttemptID", "workerRequestID"])
     identifier(intent[key]);
+  identifier(intent.canonicalTaskID);
+  // The pair keys the T3 thread, so both stay inside the mission identity limits.
+  if (
+    !isTexosMissionId(intent.canonicalTaskID) ||
+    !isTexosMissionId(String(intent.canonicalAttemptID))
+  ) {
+    throw new ExecutionProtocolError("invalidExecutionIdentity");
+  }
   const scope = exact(intent.scope, [
     "authorityID",
     "installationID",
@@ -288,8 +340,24 @@ export function decodeExecutionHostRequest(value: unknown): ExecutionHostRequest
     case "execution.admit":
       decodeExecutionIntent(frame.params);
       break;
-    case "execution.status":
-    case "execution.stop": {
+    case "execution.status": {
+      const params = exact(
+        frame.params,
+        Object.hasOwn(object(frame.params), "textOffset")
+          ? ["commandID", "envelopeDigest", "textOffset"]
+          : ["commandID", "envelopeDigest"],
+      );
+      uuid(params.commandID);
+      digestString(params.envelopeDigest);
+      if (
+        params.textOffset !== undefined &&
+        (!Number.isSafeInteger(params.textOffset) || Number(params.textOffset) < 0)
+      )
+        throw new ExecutionProtocolError("invalidExecutionTextOffset");
+      break;
+    }
+    case "execution.stop":
+    case "execution.reconcile": {
       const params = exact(frame.params, ["commandID", "envelopeDigest"]);
       uuid(params.commandID);
       digestString(params.envelopeDigest);
@@ -350,6 +418,35 @@ export function decodeNativeAuthorization(value: unknown): NativeExecutionAuthor
     throw new ExecutionProtocolError("invalidNativeAuthorization");
   }
   return result as unknown as NativeExecutionAuthorization;
+}
+
+// Leaves room in a 64 KiB frame for the receipt view around the page.
+export const ANSWER_PAGE_BYTES = 48 * 1024;
+const pageEncoder = new TextEncoder();
+
+/**
+ * A page of the answer from a code-point offset, sized by its JSON-encoded bytes so escapes
+ * can never push a frame past its limit. `final` means the text will not change again.
+ */
+export function answerPage(text: string, offset: number, final: boolean, truncated: boolean) {
+  const points = Array.from(text);
+  const start = Math.min(offset, points.length);
+  let bytes = 0;
+  let end = start;
+  while (end < points.length) {
+    const size = pageEncoder.encode(JSON.stringify(points[end])).length - 2;
+    if (bytes + size > ANSWER_PAGE_BYTES) break;
+    bytes += size;
+    end++;
+  }
+  return {
+    offset: start,
+    text: points.slice(start, end).join(""),
+    nextOffset: end,
+    total: points.length,
+    final,
+    truncated,
+  };
 }
 
 function canonicalJSON(value: unknown): string {

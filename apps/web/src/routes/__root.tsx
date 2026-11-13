@@ -14,6 +14,7 @@ import { useEffect, useEffectEvent } from "react";
 
 import { APP_DISPLAY_NAME, APP_VERSION } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
+import { SidebarProvider } from "../components/ui/sidebar";
 import { CommandPalette } from "../components/CommandPalette";
 import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
 import { GuestShareDialogHost } from "../components/chat/GuestShareControls";
@@ -111,6 +112,17 @@ export const Route = createRootRoute({
   }),
 });
 
+// Embedded views have no app chrome: TexOS draws the frame around them.
+const EMBED_PATH_PREFIX = "/embed/";
+
+function EmbedSignedOutNotice() {
+  return (
+    <main className="flex h-dvh items-center justify-center p-6 text-sm text-muted-foreground">
+      This coding view needs the TexOS app to be signed in.
+    </main>
+  );
+}
+
 function RootRouteNotFoundView() {
   return (
     <main className="flex min-h-0 min-w-0 flex-1 items-center justify-center p-6">
@@ -155,6 +167,15 @@ function RootRouteBranch() {
   // Handle links before onboarding redirects lose them.
   if (hostedPromptLinkLanding !== null) {
     return hostedPromptLinkLanding;
+  }
+
+  if (pathname.startsWith(EMBED_PATH_PREFIX)) {
+    if (!primaryEnvironmentAuthenticated) return <EmbedSignedOutNotice />;
+    return (
+      <SidebarProvider className="h-dvh! min-h-0!" defaultOpen={false}>
+        <Outlet />
+      </SidebarProvider>
+    );
   }
 
   if (pathname === "/welcome") {

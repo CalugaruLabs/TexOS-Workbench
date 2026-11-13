@@ -3,6 +3,7 @@ import type {
   PersonalAgentEvent,
   PersonalAgentHello,
   PersonalAgentResponse,
+  PersonalAgentSnapshot,
 } from "@t3tools/contracts";
 // @effect-diagnostics nodeBuiltinImport:off - Private inherited Node descriptors and opaque UUIDs; no provider subprocess.
 import * as NodeTimers from "node:timers";
@@ -15,6 +16,7 @@ import {
   EXECUTION_FRAME_BYTES,
   decodeExecutionHostRequest,
   type ExecutionChannelBinding,
+  type ExecutionObservationKey,
 } from "./executionProtocol.ts";
 import {
   decodePersonalAgentCommand,
@@ -24,6 +26,9 @@ import {
   isPersonalAgentRunDetail,
   isPersonalAgentExecutionMethod,
   personalAgentExecutionAvailable,
+  personalAgentCanonicalFreshness,
+  withoutPersonalAgentCanonicalTasks,
+  type PersonalAgentCanonicalCursor,
 } from "@t3tools/shared/personalAgents";
 
 export type NativeProvider = "codex" | "claudeCode";
@@ -69,8 +74,15 @@ export const MAX_FRAME = 65536;
 export const MAX_NATIVE_FRAME = 1024 * 1024;
 
 /** A single host generation. EOF is permanent; it never reconnects or resends. */
+/** Builds the endpoint once TexOS's first hello names the binding; `readBinding` asks TexOS back. */
+export type ExecutionEndpointFactory = (
+  binding: ExecutionChannelBinding,
+  readBinding: (key: ExecutionObservationKey, signal: AbortSignal) => Promise<unknown>,
+) => PrivateExecutionEndpoint;
+
 export class NativeBridge {
   private executionChannel: PrivateExecutionChannel | undefined;
+  private executionEndpointFactory: ExecutionEndpointFactory | undefined;
   private agentPending = new Map<
     string,
     {
@@ -89,6 +101,13 @@ export class NativeBridge {
   private agentRevoked = false;
   private agentExecutionBlocked = false;
   private agentRevision = 0;
+  private agentCanonicalCursor: PersonalAgentCanonicalCursor | undefined;
+  private agentCanonicalAwaitingRead = false;
+  private agentSnapshotReadOrdinal = 0;
+  // Only a newer read already answered overtakes a read; readers share this bridge.
+  private agentSnapshotAnsweredOrdinal = 0;
+  private agentCanonicalPresented: PersonalAgentSnapshot["canonicalTasks"];
+  private agentProjectionEpoch = 0;
   private pending = new Map<
     string,
     {
@@ -151,6 +170,15 @@ export class NativeBridge {
   }
   close() {
     this.fail(new Error("Native bridge closed."));
+  }
+  /**
+   * Arms execution control for the first `execution.hello` on this private pipe, which then
+   * supplies the binding. Only TexOS can write to the pipe, so the binding stays native-owned.
+   */
+  enableExecutionControl(factory: ExecutionEndpointFactory) {
+    if (this.failure || this.executionChannel || this.executionEndpointFactory)
+      throw new Error("Execution control cannot be rebound.");
+    this.executionEndpointFactory = factory;
   }
   /** Native-owned pipe bootstrap must supply this binding; renderer/environment assertions cannot. */
   installExecutionControl(binding: ExecutionChannelBinding, endpoint: PrivateExecutionEndpoint) {
@@ -242,7 +270,48 @@ export class NativeBridge {
     this.agentRevoked ||= frame.snapshot.revoked;
     this.agentExecutionBlocked ||= !personalAgentExecutionAvailable(frame.snapshot);
     this.agentRevision = Math.max(this.agentRevision, frame.snapshot.revision);
-    for (const listener of this.agentListeners) listener(frame as unknown as PersonalAgentEvent);
+    const snapshot = this.presentCanonicalTasks(frame.snapshot, false);
+    const event = { ...frame, snapshot } as unknown as PersonalAgentEvent;
+    for (const listener of this.agentListeners) listener(event);
+  }
+
+  private presentCanonicalTasks(snapshot: PersonalAgentSnapshot, freshRead: boolean) {
+    const decision = personalAgentCanonicalFreshness(
+      snapshot.canonicalTasks,
+      this.agentCanonicalCursor,
+      freshRead,
+    );
+    if (
+      !freshRead &&
+      (decision === "readRequired" ||
+        (decision === "absent" && this.agentCanonicalCursor !== undefined) ||
+        snapshot.revoked)
+    )
+      this.agentProjectionEpoch += 1;
+    if (
+      decision === "readRequired" ||
+      (decision === "absent" && this.agentCanonicalCursor !== undefined && !freshRead)
+    )
+      this.agentCanonicalAwaitingRead = true;
+    if (
+      snapshot.revoked ||
+      this.agentRevoked ||
+      decision === "stale" ||
+      decision === "readRequired" ||
+      (this.agentCanonicalAwaitingRead && !freshRead)
+    ) {
+      if (decision !== "stale") this.agentCanonicalPresented = undefined;
+      return withoutPersonalAgentCanonicalTasks(snapshot);
+    }
+    this.agentCanonicalPresented = snapshot.canonicalTasks;
+    if (freshRead) this.agentCanonicalAwaitingRead = false;
+    if (freshRead && decision === "absent") this.agentCanonicalCursor = undefined;
+    if (decision === "accept" && snapshot.canonicalTasks)
+      this.agentCanonicalCursor = {
+        generation: snapshot.canonicalTasks.projectionGeneration,
+        revision: snapshot.canonicalTasks.revision,
+      };
+    return snapshot;
   }
   private receive(chunk: Buffer) {
     if (this.failure) return;
@@ -264,6 +333,26 @@ export class NativeBridge {
         const frame = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
         if (frame?.namespace === EXECUTION_NAMESPACE) {
           if (newline > EXECUTION_FRAME_BYTES) throw new Error("Execution frame exceeds limit.");
+          if (!this.executionChannel && this.executionEndpointFactory) {
+            const request = decodeExecutionHostRequest(frame);
+            if (request.method === "execution.hello") {
+              const factory = this.executionEndpointFactory;
+              this.executionEndpointFactory = undefined;
+              const binding = {
+                authorityID: request.authorityID,
+                hostID: request.hostID,
+                hostGeneration: request.hostGeneration,
+              };
+              this.installExecutionControl(
+                binding,
+                factory(binding, (key, signal) => {
+                  if (!this.executionChannel)
+                    return Promise.reject(new Error("Execution control unavailable."));
+                  return this.executionChannel.readBinding(key, signal);
+                }),
+              );
+            }
+          }
           if (this.executionChannel) this.executionChannel.receive(frame);
           else {
             const request = decodeExecutionHostRequest(frame);
@@ -423,7 +512,10 @@ export class NativeBridge {
             "Agent execution is not enabled on this connection. Saved agents and history remain available.",
         },
       };
-    const response = await this.requestAgents(command);
+    const readOrdinal =
+      command.method === "agents.snapshot" ? ++this.agentSnapshotReadOrdinal : undefined;
+    const projectionEpoch = this.agentProjectionEpoch;
+    let response = await this.requestAgents(command);
     if (response.ok && command.method === "agents.hello") {
       if (this.failure) throw this.failure;
       if (
@@ -475,6 +567,26 @@ export class NativeBridge {
         this.agentRevoked ||= snapshot.revoked;
         this.agentExecutionBlocked ||= !personalAgentExecutionAvailable(snapshot);
         this.agentRevision = Math.max(this.agentRevision, snapshot.revision);
+        const overtaken =
+          readOrdinal !== undefined && readOrdinal < this.agentSnapshotAnsweredOrdinal;
+        if (readOrdinal !== undefined && !overtaken)
+          this.agentSnapshotAnsweredOrdinal = readOrdinal;
+        const current = this.agentCanonicalPresented;
+        const composed =
+          projectionEpoch !== this.agentProjectionEpoch
+            ? withoutPersonalAgentCanonicalTasks(snapshot)
+            : !overtaken
+              ? this.presentCanonicalTasks(snapshot, readOrdinal !== undefined)
+              : current && !snapshot.revoked && !this.agentRevoked
+                ? { ...withoutPersonalAgentCanonicalTasks(snapshot), canonicalTasks: current }
+                : withoutPersonalAgentCanonicalTasks(snapshot);
+        response = {
+          ...response,
+          result:
+            command.method === "agents.snapshot"
+              ? composed
+              : { ...(result as Record<string, unknown>), snapshot: composed },
+        };
       }
     } else if (response.ok && command.method === "agents.artifact") {
       const result = response.result;

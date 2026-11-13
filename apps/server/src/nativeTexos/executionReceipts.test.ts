@@ -9,10 +9,12 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import Migration from "../persistence/Migrations/070_NativeExecutionReceipts.ts";
 import * as Receipts from "./executionReceipts.ts";
 import { executionEnvelope } from "./executionProtocol.ts";
-import { syntheticIntent } from "./execution.testkit.ts";
+import { syntheticIntent, executionReceiptMigrations as Migration } from "./execution.testkit.ts";
+import Migration070 from "../persistence/Migrations/070_NativeExecutionReceipts.ts";
+import Migration071 from "../persistence/Migrations/071_NativeExecutionOutcomes.ts";
+import { texosMissionThreadId } from "@t3tools/shared/texosMission";
 
 const database = Layer.mergeAll(
   NodeSqliteClient.layer({ filename: ":memory:" }),
@@ -33,7 +35,7 @@ describe("native execution durable receipts", () => {
         const intent = syntheticIntent();
         const original = yield* Effect.gen(function* () {
           const store = yield* Receipts.ExecutionReceipts;
-          const admitted = yield* store.admit(intent);
+          const admitted = yield* store.admit(intent, "generation-1");
           const starting = yield* store.transition(admitted.receipt, "starting");
           const running = yield* store.transition(starting, "running", {
             nativeThreadID: "original-native-thread",
@@ -107,7 +109,7 @@ describe("native execution durable receipts", () => {
         const intent = syntheticIntent();
         const first = yield* Effect.gen(function* () {
           const store = yield* Receipts.ExecutionReceipts;
-          const admitted = yield* store.admit(intent);
+          const admitted = yield* store.admit(intent, "generation-1");
           yield* store.transition(admitted.receipt, "starting");
           return admitted.receipt;
         }).pipe(
@@ -124,7 +126,7 @@ describe("native execution durable receipts", () => {
         const reopened = yield* Effect.gen(function* () {
           const store = yield* Receipts.ExecutionReceipts;
           yield* store.recoverInterrupted;
-          return yield* store.admit(intent);
+          return yield* store.admit(intent, "generation-1");
         }).pipe(
           Effect.provide(Receipts.layer.pipe(Layer.provide(NodeSqliteClient.layer({ filename })))),
         );
@@ -142,18 +144,23 @@ describe("native execution durable receipts", () => {
       Effect.gen(function* () {
         const store = yield* Receipts.ExecutionReceipts;
         const intent = syntheticIntent();
-        const first = yield* store.admit(intent);
-        const duplicate = yield* store.admit(intent);
+        const first = yield* store.admit(intent, "generation-1");
+        const duplicate = yield* store.admit(intent, "generation-1");
         assert.isTrue(first.created);
         assert.isFalse(duplicate.created);
         assert.deepEqual(first.receipt, duplicate.receipt);
         assert.isTrue(
-          Exit.isFailure(yield* Effect.exit(store.admit({ ...intent, input: "different" }))),
+          Exit.isFailure(
+            yield* Effect.exit(store.admit({ ...intent, input: "different" }, "generation-1")),
+          ),
         );
         assert.isTrue(
           Exit.isFailure(
             yield* Effect.exit(
-              store.admit({ ...intent, commandID: "00000000-0000-4000-8000-000000000002" }),
+              store.admit(
+                { ...intent, commandID: "00000000-0000-4000-8000-000000000002" },
+                "generation-1",
+              ),
             ),
           ),
         );
@@ -173,10 +180,10 @@ describe("native execution durable receipts", () => {
       Effect.gen(function* () {
         const store = yield* Receipts.ExecutionReceipts;
         const intent = syntheticIntent();
-        const first = yield* store.admit(intent);
+        const first = yield* store.admit(intent, "generation-1");
         yield* store.transition(first.receipt, "starting");
         yield* store.recoverInterrupted;
-        const repeated = yield* store.admit(intent);
+        const repeated = yield* store.admit(intent, "generation-1");
         assert.isFalse(repeated.created);
         assert.equal(repeated.receipt.phase, "uncertain");
         assert.equal(repeated.receipt.childID, first.receipt.childID);
@@ -199,7 +206,7 @@ describe("native execution durable receipts", () => {
     () =>
       Effect.gen(function* () {
         const store = yield* Receipts.ExecutionReceipts;
-        const first = yield* store.admit(syntheticIntent());
+        const first = yield* store.admit(syntheticIntent(), "generation-1");
         const starting = yield* store.transition(first.receipt, "starting");
         const running = yield* store.transition(starting, "running", {
           nativeThreadID: "fixture-thread",
@@ -225,5 +232,226 @@ describe("native execution durable receipts", () => {
           ),
         );
       }).pipe(Effect.provide(receiptsLayer)),
+  );
+
+  it.effect("each TexOS attempt keys exactly one derived T3 thread", () =>
+    Effect.gen(function* () {
+      const store = yield* Receipts.ExecutionReceipts;
+      const sql = yield* SqlClient.SqlClient;
+      const intent = syntheticIntent();
+      const first = yield* store.admit(intent, "generation-1");
+      assert.equal(
+        first.receipt.t3ThreadID,
+        yield* Effect.promise(() => texosMissionThreadId("canonical-task", "canonical-attempt")),
+      );
+      yield* sql`UPDATE native_execution_receipts SET phase = 'stopped', drained = 1, outcome = 'interrupted'`;
+      const reused = yield* Effect.flip(
+        store.admit(
+          {
+            ...intent,
+            commandID: "00000000-0000-4000-8000-000000000002",
+            canonicalRunID: "canonical-run-2",
+          },
+          "generation-1",
+        ),
+      );
+      assert.equal(reused.code, "executionAttemptAlreadyAdmitted");
+      const retry = yield* store.admit(
+        {
+          ...intent,
+          commandID: "00000000-0000-4000-8000-000000000003",
+          canonicalRunID: "canonical-run-3",
+          canonicalAttemptID: "canonical-attempt-2",
+        },
+        "generation-1",
+      );
+      assert.equal(
+        retry.receipt.t3ThreadID,
+        yield* Effect.promise(() => texosMissionThreadId("canonical-task", "canonical-attempt-2")),
+      );
+    }).pipe(Effect.provide(receiptsLayer)),
+  );
+  it.effect("a finished run's outcome and answer survive a T3 restart", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "texos-execution-finish-" });
+      const filename = NodePath.join(root, "synthetic-t3.sqlite");
+      const intent = syntheticIntent();
+      const answer = 'Line one\n\n\u0000 quotes " and emoji \u{1F600}';
+      yield* Effect.gen(function* () {
+        const store = yield* Receipts.ExecutionReceipts;
+        const admitted = yield* store.admit(intent, "generation-1");
+        const running = yield* store.transition(
+          yield* store.transition(admitted.receipt, "starting"),
+          "running",
+        );
+        assert.equal(
+          (yield* Effect.flip(store.transition(running, "attemptFinished"))).code,
+          "invalidExecutionTransition",
+        );
+        yield* store.transition(
+          running,
+          "attemptFinished",
+          {},
+          {
+            outcome: "failed",
+            answer: { text: answer, truncated: false },
+          },
+        );
+      }).pipe(
+        Effect.provide(
+          Receipts.layer.pipe(
+            Layer.provide(
+              Layer.effectDiscard(Migration).pipe(
+                Layer.provideMerge(NodeSqliteClient.layer({ filename })),
+              ),
+            ),
+          ),
+        ),
+      );
+      const reopened = yield* Effect.gen(function* () {
+        const store = yield* Receipts.ExecutionReceipts;
+        yield* store.recoverInterrupted;
+        return yield* store.get(
+          intent.commandID,
+          executionEnvelope(intent).digest,
+          intent.scope.authorityID,
+        );
+      }).pipe(
+        Effect.provide(Receipts.layer.pipe(Layer.provide(NodeSqliteClient.layer({ filename })))),
+      );
+      assert.equal(reopened?.phase, "attemptFinished");
+      assert.equal(reopened?.hostGeneration, "generation-1");
+      assert.deepEqual(reopened?.finish, {
+        outcome: "failed",
+        answer: { text: answer, truncated: false },
+      });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("an answer over the cap is cut at a code point and marked truncated", () =>
+    Effect.sync(() => {
+      const text = "a".repeat(Receipts.EXECUTION_ANSWER_BYTES - 1) + "\u{1F600}tail";
+      const bounded = Receipts.boundedAnswer({ text, truncated: false });
+      assert.isTrue(bounded.truncated);
+      assert.equal(bounded.text, "a".repeat(Receipts.EXECUTION_ANSWER_BYTES - 1));
+      assert.deepEqual(Receipts.boundedAnswer({ text: "short", truncated: false }), {
+        text: "short",
+        truncated: false,
+      });
+    }),
+  );
+
+  it.effect("only an uncertain run from an earlier T3 launch can be abandoned", () =>
+    Effect.gen(function* () {
+      const store = yield* Receipts.ExecutionReceipts;
+      const intent = syntheticIntent();
+      const digest = executionEnvelope(intent).digest;
+      const admitted = yield* store.admit(intent, "generation-1");
+      const abandon = (generation: string) =>
+        Effect.flip(store.abandon(intent.commandID, digest, intent.scope.authorityID, generation));
+      assert.equal((yield* abandon("generation-2")).code, "executionNotAbandonable");
+      yield* store.transition(admitted.receipt, "uncertain");
+      assert.isTrue(yield* store.hasUnresolved);
+      assert.equal((yield* abandon("generation-1")).code, "executionNotAbandonable");
+      const abandoned = yield* store.abandon(
+        intent.commandID,
+        digest,
+        intent.scope.authorityID,
+        "generation-2",
+      );
+      assert.equal(abandoned.phase, "abandoned");
+      assert.isFalse(abandoned.drained);
+      assert.isUndefined(abandoned.finish);
+      assert.isFalse(yield* store.hasUnresolved);
+      const again = yield* store.abandon(
+        intent.commandID,
+        digest,
+        intent.scope.authorityID,
+        "generation-2",
+      );
+      assert.equal(again.phase, "abandoned");
+      const next = yield* store.admit(
+        {
+          ...intent,
+          commandID: "00000000-0000-4000-8000-000000000002",
+          canonicalRunID: "canonical-run-2",
+          canonicalAttemptID: "canonical-attempt-2",
+        },
+        "generation-2",
+      );
+      assert.isTrue(next.created);
+    }).pipe(Effect.provide(receiptsLayer)),
+  );
+
+  it.effect("receipts written before the outcome columns stay readable and can be reconciled", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* Migration070;
+      const uncertain = syntheticIntent();
+      const finished = {
+        ...uncertain,
+        commandID: "00000000-0000-4000-8000-000000000002",
+        canonicalRunID: "canonical-run-2",
+        canonicalAttemptID: "canonical-attempt-2",
+      };
+      yield* sql`INSERT INTO native_execution_runtime(singleton, runtime_id) VALUES (1, 'runtime-before')`;
+      for (const [intent, phase, drained] of [
+        [uncertain, "uncertain", 0],
+        [finished, "attemptFinished", 1],
+      ] as const) {
+        const envelope = executionEnvelope(intent);
+        yield* sql`
+          INSERT INTO native_execution_receipts
+            (command_id, canonical_run_id, authority_id, envelope_digest, envelope_json, runtime_id,
+             child_id, t3_thread_id, t3_provider_session_id, phase, mappings_json, drained)
+          VALUES (${intent.commandID}, ${intent.canonicalRunID}, ${intent.scope.authorityID},
+            ${envelope.digest}, ${envelope.json}, 'runtime-before', ${`child-${phase}`},
+            ${`thread-${phase}`}, ${`session-${phase}`}, ${phase}, '{}', ${drained})
+        `;
+      }
+      yield* Migration071;
+      const store = yield* Receipts.ExecutionReceipts.pipe(
+        Effect.provide(Receipts.layer.pipe(Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)))),
+      );
+      const read = (intent: typeof uncertain) =>
+        store.get(intent.commandID, executionEnvelope(intent).digest, intent.scope.authorityID);
+      const done = yield* read(finished);
+      assert.equal(done?.phase, "attemptFinished");
+      assert.isTrue(done?.drained);
+      assert.equal(done?.hostGeneration, Receipts.LEGACY_HOST_GENERATION);
+      assert.isUndefined(done?.finish);
+      const saved = yield* read(uncertain);
+      assert.equal(saved?.phase, "uncertain");
+      assert.equal(saved?.hostGeneration, Receipts.LEGACY_HOST_GENERATION);
+      assert.isUndefined(saved?.finish);
+      assert.isTrue(yield* store.hasUnresolved);
+      const abandoned = yield* store.abandon(
+        uncertain.commandID,
+        executionEnvelope(uncertain).digest,
+        uncertain.scope.authorityID,
+        "generation-2",
+      );
+      assert.equal(abandoned.phase, "abandoned");
+      assert.isFalse(yield* store.hasUnresolved);
+      // Only a legacy receipt may be finished without an outcome.
+      yield* sql`UPDATE native_execution_receipts SET host_generation = 'generation-1' WHERE command_id = ${finished.commandID}`;
+      assert.equal((yield* Effect.flip(read(finished))).code, "invalidExecutionReceipt");
+      // A launch can't take the legacy generation as its own.
+      assert.equal(
+        (yield* Effect.flip(
+          store.admit(
+            {
+              ...uncertain,
+              commandID: "00000000-0000-4000-8000-000000000003",
+              canonicalRunID: "canonical-run-3",
+              canonicalAttemptID: "canonical-attempt-3",
+            },
+            Receipts.LEGACY_HOST_GENERATION,
+          ),
+        )).code,
+        "invalidExecutionIntent",
+      );
+    }).pipe(Effect.provide(database)),
   );
 });

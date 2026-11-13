@@ -5,7 +5,7 @@ import {
   EXECUTION_CAPABILITY,
   executionEnvelope,
   type ExecutionWireResponse,
-  type ExecutionAuthorizationRequest,
+  type ExecutionNativeRequest,
 } from "./executionProtocol.ts";
 import {
   syntheticBinding,
@@ -16,7 +16,7 @@ import {
 
 describe("private execution direction and correlation", () => {
   it("processes a native authorization reply while the original request handler awaits it", async () => {
-    const sent: Array<ExecutionWireResponse | ExecutionAuthorizationRequest> = [];
+    const sent: Array<ExecutionWireResponse | ExecutionNativeRequest> = [];
     const intent = syntheticIntent();
     const envelopeDigest = executionEnvelope(intent).digest;
     let settle: (() => void) | undefined;
@@ -136,6 +136,58 @@ describe("private execution direction and correlation", () => {
         result: syntheticAuthorization(syntheticIntent(), 0),
       }),
     ).toThrow();
+    channel.close();
+  });
+
+  it("keeps answering a launch's requests past 256, and still refuses a recent or held repeat", async () => {
+    const held = syntheticRequest("execution.hello", { capabilities: [] }, 1);
+    let release: (() => void) | undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let answered = 0;
+    let failed = false;
+    let next: (() => void) | undefined;
+    const channel = new PrivateExecutionChannel(
+      syntheticBinding,
+      {
+        handle: async (request) => {
+          if (request.id === held.id) await released;
+          return { capabilities: [] };
+        },
+        disconnect: async () => {},
+      },
+      (frame) => {
+        if (frame.kind === "response") {
+          answered++;
+          next?.();
+        }
+      },
+      () => {
+        failed = true;
+      },
+    );
+    channel.receive(held);
+    for (let ordinal = 2; ordinal <= 301; ordinal++) {
+      const replied = new Promise<void>((resolve) => {
+        next = resolve;
+      });
+      channel.receive(syntheticRequest("execution.hello", { capabilities: [] }, ordinal));
+      await replied;
+    }
+    expect(answered).toBe(300);
+    expect(failed).toBe(false);
+    // The held request is still in flight, so 300 later ones never evicted its ID.
+    expect(() => channel.receive(held)).toThrow();
+    expect(() =>
+      channel.receive(syntheticRequest("execution.hello", { capabilities: [] }, 301)),
+    ).toThrow();
+    const settled = new Promise<void>((resolve) => {
+      next = resolve;
+    });
+    release?.();
+    await settled;
+    expect(answered).toBe(301);
     channel.close();
   });
 });

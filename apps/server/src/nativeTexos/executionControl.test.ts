@@ -12,7 +12,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
-import Migration from "../persistence/Migrations/070_NativeExecutionReceipts.ts";
+import { ManagedExecutionProvider } from "./executionManaged.ts";
 import * as Receipts from "./executionReceipts.ts";
 import {
   ControlledExecutionProvider,
@@ -30,7 +30,13 @@ import {
   syntheticIntent,
   syntheticRequest,
   syntheticAuthorization,
+  executionReceiptMigrations as Migration,
 } from "./execution.testkit.ts";
+
+const syntheticFinish: Receipts.ExecutionFinish = {
+  outcome: "completed",
+  answer: { text: "Synthetic answer.", truncated: false },
+};
 
 const database = Layer.mergeAll(
   NodeSqliteClient.layer({ filename: ":memory:" }),
@@ -77,6 +83,53 @@ function authorizer(
 }
 
 describe("private admitted execution", () => {
+  it.effect(
+    "managed and controlled XOR rejects both, and receipt recovery is explicit control activation",
+    () =>
+      Effect.gen(function* () {
+        const intent = yield* physicalIntent;
+        const store = yield* Receipts.ExecutionReceipts;
+        let recoveries = 0;
+        const count = { value: 0 };
+        const controlled = unavailableProvider(count);
+        const managed = ManagedExecutionProvider.of({
+          mode: "managed-cli-subscription",
+          available: true,
+          supports: () => true,
+          create: () =>
+            Effect.sync(() => {
+              count.value++;
+            }).pipe(
+              Effect.andThen(Effect.fail(new ExecutionControlError({ code: "mustNotCreate" }))),
+            ),
+          observation: () => undefined,
+          answer: () => undefined,
+        });
+        assert.equal(recoveries, 0);
+        const control = yield* makeExecutionControl(syntheticBinding).pipe(
+          Effect.provideService(ControlledExecutionProvider, controlled),
+          Effect.provideService(ManagedExecutionProvider, managed),
+          Effect.provideService(Receipts.ExecutionReceipts, {
+            ...store,
+            recoverInterrupted: Effect.sync(() => {
+              recoveries++;
+            }).pipe(Effect.andThen(store.recoverInterrupted)),
+          }),
+        );
+        assert.equal(recoveries, 1);
+        const native = authorizer(intent, yield* Clock.currentTimeMillis);
+        assert.deepEqual(
+          yield* control.handle(syntheticRequest("execution.hello", { capabilities: [] }), native),
+          { capabilities: [] },
+        );
+        assert.isTrue(
+          Exit.isFailure(
+            yield* Effect.exit(control.handle(syntheticRequest("execution.admit", intent), native)),
+          ),
+        );
+        assert.equal(count.value, 0);
+      }).pipe(Effect.scoped, Effect.provide(receiptsLayer)),
+  );
   it.effect(
     "missing native authorization or provider handler advertises nothing and starts nothing",
     () =>
@@ -141,6 +194,7 @@ describe("private admitted execution", () => {
             ...intent,
             commandID: NodeCrypto.randomUUID(),
             canonicalRunID: NodeCrypto.randomUUID(),
+            canonicalAttemptID: NodeCrypto.randomUUID(),
           };
           const native = authorizer(request, now, patch);
           const hello = yield* control.handle(
@@ -184,6 +238,7 @@ describe("private admitted execution", () => {
         ...original,
         commandID: NodeCrypto.randomUUID(),
         canonicalRunID: NodeCrypto.randomUUID(),
+        canonicalAttemptID: NodeCrypto.randomUUID(),
         worktree: { ...original.worktree, inode: String(BigInt(original.worktree.inode) + 1n) },
       };
       yield* control.handle(
@@ -250,7 +305,7 @@ describe("private admitted execution", () => {
             }).pipe(
               Effect.andThen(Deferred.succeed(entered, undefined)),
               Effect.andThen(Deferred.await(finish)),
-              Effect.as({ mappings: {}, drained: true }),
+              Effect.as({ mappings: {}, drained: true, finish: syntheticFinish }),
             ),
             stop: Deferred.succeed(finish, undefined).pipe(Effect.asVoid),
           }),
@@ -282,6 +337,7 @@ describe("private admitted execution", () => {
         ...intent,
         commandID: NodeCrypto.randomUUID(),
         canonicalRunID: NodeCrypto.randomUUID(),
+        canonicalAttemptID: NodeCrypto.randomUUID(),
       };
       assert.isTrue(
         Exit.isFailure(
@@ -335,7 +391,7 @@ describe("private admitted execution", () => {
             }).pipe(
               Effect.andThen(Deferred.succeed(entered, undefined)),
               Effect.andThen(Deferred.await(ceased)),
-              Effect.as({ mappings: {}, drained: true }),
+              Effect.as({ mappings: {}, drained: true, finish: syntheticFinish }),
             ),
             stop: Deferred.succeed(ceased, undefined).pipe(Effect.asVoid),
           }),
@@ -363,6 +419,94 @@ describe("private admitted execution", () => {
       assert.propertyVal(duplicate, "phase", "stopped");
       assert.propertyVal(duplicate, "drained", true);
       assert.equal(starts, 1);
+    }).pipe(Effect.scoped, Effect.provide(receiptsLayer)),
+  );
+  it.effect(
+    "reconcile ends an earlier launch's uncertain run, and status pages the live answer until then",
+    () =>
+      Effect.gen(function* () {
+        const intent = yield* physicalIntent;
+        const store = yield* Receipts.ExecutionReceipts;
+        const digest = executionEnvelope(intent).digest;
+        const earlier = yield* store.admit(intent, "generation-0");
+        yield* store.transition(earlier.receipt, "uncertain");
+        const managed = ManagedExecutionProvider.of({
+          mode: "managed-cli-subscription",
+          available: true,
+          supports: () => true,
+          create: () => Effect.fail(new ExecutionControlError({ code: "mustNotCreate" })),
+          observation: () => undefined,
+          answer: (commandID) => (commandID === intent.commandID ? "Partial 😀 answer" : undefined),
+        });
+        const control = yield* makeExecutionControl(syntheticBinding).pipe(
+          Effect.provideService(ManagedExecutionProvider, managed),
+        );
+        const command = { commandID: intent.commandID, envelopeDigest: digest };
+        const status = yield* control.handle(
+          syntheticRequest("execution.status", { ...command, textOffset: 8 }),
+        );
+        assert.propertyVal(status, "phase", "uncertain");
+        assert.propertyVal(status, "outcome", null);
+        assert.deepPropertyVal(status, "answer", {
+          offset: 8,
+          text: "😀 answer",
+          nextOffset: 16,
+          total: 16,
+          final: false,
+          truncated: false,
+        });
+        const native = authorizer(intent, yield* Clock.currentTimeMillis);
+        const second = {
+          ...intent,
+          commandID: "00000000-0000-4000-8000-000000000002",
+          canonicalRunID: "canonical-run-2",
+          canonicalAttemptID: "canonical-attempt-2",
+        };
+        assert.equal(
+          (yield* Effect.flip(control.handle(syntheticRequest("execution.admit", second), native)))
+            .code,
+          "executionCapacityOccupied",
+        );
+        const reconciled = yield* control.handle(syntheticRequest("execution.reconcile", command));
+        assert.propertyVal(reconciled, "phase", "abandoned");
+        assert.propertyVal(reconciled, "reconciliationRequired", false);
+        assert.propertyVal(
+          yield* control.handle(syntheticRequest("execution.reconcile", command)),
+          "phase",
+          "abandoned",
+        );
+        assert.isFalse(yield* store.hasUnresolved);
+        assert.propertyVal(
+          yield* control.handle(
+            syntheticRequest("execution.reconcile", {
+              commandID: second.commandID,
+              envelopeDigest: executionEnvelope(second).digest,
+            }),
+          ),
+          "phase",
+          "unknown",
+        );
+      }).pipe(Effect.scoped, Effect.provide(receiptsLayer)),
+  );
+
+  it.effect("a run admitted by this T3 launch cannot be reconciled", () =>
+    Effect.gen(function* () {
+      const intent = yield* physicalIntent;
+      const store = yield* Receipts.ExecutionReceipts;
+      const admitted = yield* store.admit(intent, syntheticBinding.hostGeneration);
+      yield* store.transition(admitted.receipt, "uncertain");
+      const control = yield* makeExecutionControl(syntheticBinding);
+      assert.equal(
+        (yield* Effect.flip(
+          control.handle(
+            syntheticRequest("execution.reconcile", {
+              commandID: intent.commandID,
+              envelopeDigest: executionEnvelope(intent).digest,
+            }),
+          ),
+        )).code,
+        "executionNotAbandonable",
+      );
     }).pipe(Effect.scoped, Effect.provide(receiptsLayer)),
   );
 });

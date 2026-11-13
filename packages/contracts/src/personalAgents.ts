@@ -54,6 +54,97 @@ export type PersonalAgentAttention = {
       answerable: boolean;
     }
 );
+/** Read-only correlation from the native parent, never execution or result authority. */
+export interface PersonalAgentNativeDelegationBinding {
+  agentID: string;
+  conversationID: string;
+  nativeProjectID: string;
+  nativeTaskID: string;
+  nativeRunID: string;
+  nativeCommandID: string;
+  nativeParentRunID?: string;
+  childRunID: string;
+  runtimeID: string;
+  runtimeRunID: string;
+  providerID: PersonalAgentProvider;
+}
+export interface PersonalAgentNativeDelegation {
+  binding: PersonalAgentNativeDelegationBinding;
+  bindingFingerprint: string;
+  observation: {
+    sequence: number;
+    phase: "observed" | "attemptStarted" | "attemptEnded" | "uncertain";
+    observedAt: number;
+    providerSessionID?: string;
+    providerTurnID?: string;
+    artifactRefs: string[];
+  };
+  observationFingerprint: string;
+}
+export interface PersonalAgentNativeDelegationSnapshot {
+  derivedOnly: true;
+  authority: "nativeParent";
+  completionVerified: false;
+  items: PersonalAgentNativeDelegation[];
+  nextBefore?: number | null;
+  history: { bounded: true; total: number; limit: 100; returned: number };
+}
+export interface PersonalAgentCanonicalRun {
+  nativeCommandID: string;
+  nativeRunID: string;
+  nativeParentRunID?: string;
+  parentVisibility: "root" | "included" | "outsideWindow";
+  providerID: PersonalAgentProvider;
+  commandState:
+    | "reserved"
+    | "dispatching"
+    | "acknowledged"
+    | "attemptFinished"
+    | "verified"
+    | "uncertain";
+  attemptObservation?: {
+    phase: "observed" | "attemptStarted" | "attemptEnded" | "uncertain";
+    sequence: number;
+    observedAtMs: number;
+  };
+  resultReview: "unverified" | "reviewed";
+  executionBinding?: {
+    runtimeID: string;
+    runtimeRunID: string;
+    providerSessionID?: string;
+    channelPresence: "current" | "lastRecorded" | "unknown";
+  };
+  providerAttempt?: { threadID: string; sessionID: string; turnID?: string };
+  reportedChildRunID?: string;
+}
+export interface PersonalAgentCanonicalTask {
+  agentID: string;
+  conversationID: string;
+  nativeProjectID: string;
+  nativeTaskID: string;
+  title: string;
+  displayStatus: "todo" | "working" | "needsReview" | "completionUnverified";
+  runs: PersonalAgentCanonicalRun[];
+}
+/** Native presentation only; a reviewed result does not mark its whole task done. */
+export interface PersonalAgentCanonicalTasks {
+  schemaVersion: 1;
+  projectionGeneration: string;
+  revision: number;
+  helperRuntimeID: string;
+  helperRevision: number;
+  checkedAtMs: number;
+  state: "ready" | "unavailable";
+  items: PersonalAgentCanonicalTask[];
+  history: {
+    bounded: true;
+    taskLimit: 20;
+    runLimit: 40;
+    returnedTasks: number;
+    returnedRuns: number;
+    hasMore: boolean;
+  };
+}
 export type PersonalAgentSnapshot = PersonalAgentExecutionCapability & {
   revision: number;
   runtimeID: string;
@@ -76,6 +167,8 @@ export type PersonalAgentSnapshot = PersonalAgentExecutionCapability & {
     relativePath: string;
     createdAt: string;
   }>;
+  nativeDelegations?: PersonalAgentNativeDelegationSnapshot;
+  canonicalTasks?: PersonalAgentCanonicalTasks;
   history?: {
     bounded: true;
     totalRuns: number;

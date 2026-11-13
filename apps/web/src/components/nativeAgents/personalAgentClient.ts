@@ -12,6 +12,9 @@ import {
   isPersonalAgentRunDetail,
   isPersonalAgentExecutionMethod,
   personalAgentExecutionAvailable,
+  personalAgentCanonicalFreshness,
+  withoutPersonalAgentCanonicalTasks,
+  type PersonalAgentCanonicalCursor,
 } from "@t3tools/shared/personalAgents";
 import { resolvePrimaryEnvironmentHttpUrl } from "../../environments/primary/target";
 
@@ -90,6 +93,12 @@ export class PersonalAgentClient {
   private generation = 0;
   private requiresFreshRead = false;
   private readRevision = 0;
+  private canonicalCursor: PersonalAgentCanonicalCursor | undefined;
+  private canonicalAwaitingRead = false;
+  private snapshotReadOrdinal = 0;
+  private projectionRefreshPending = false;
+  private projectionRefreshAgain = false;
+  private projectionEpoch = 0;
   constructor(private readonly transport: PersonalAgentTransport = personalAgentTransport) {}
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => {
@@ -102,16 +111,68 @@ export class PersonalAgentClient {
     this.state = { ...this.state, ...next };
     for (const listener of this.listeners) listener();
   }
-  private accept(value: unknown) {
+  private clearCanonicalTasks() {
+    if (this.state.snapshot?.canonicalTasks)
+      this.patch({ snapshot: withoutPersonalAgentCanonicalTasks(this.state.snapshot) });
+  }
+  private accept(
+    value: unknown,
+    freshRead = false,
+  ): { snapshot: PersonalAgentSnapshot; readRequired: boolean } {
     if (
       !isPersonalAgentSnapshot(value) ||
       value.runtimeID !== this.state.hello?.runtimeID ||
       value.mode !== this.state.hello.mode
     )
       throw new Error("Personal agent snapshot does not match this workspace.");
-    if (this.state.snapshot && value.revision < this.state.snapshot.revision) return;
+    if (this.state.snapshot && value.revision < this.state.snapshot.revision)
+      return { snapshot: withoutPersonalAgentCanonicalTasks(value), readRequired: false };
+    const decision = personalAgentCanonicalFreshness(
+      value.canonicalTasks,
+      this.canonicalCursor,
+      freshRead,
+    );
+    const readRequired =
+      decision === "readRequired" ||
+      (decision === "absent" && this.canonicalCursor !== undefined && !freshRead);
+    if (!freshRead && (readRequired || value.revoked)) this.projectionEpoch += 1;
+    if (readRequired) this.canonicalAwaitingRead = true;
+    let snapshot = value;
+    if (
+      value.revoked ||
+      decision === "stale" ||
+      decision === "readRequired" ||
+      (this.canonicalAwaitingRead && !freshRead)
+    )
+      snapshot = withoutPersonalAgentCanonicalTasks(value);
+    else {
+      if (freshRead) this.canonicalAwaitingRead = false;
+      if (freshRead && decision === "absent") this.canonicalCursor = undefined;
+      if (decision === "accept" && value.canonicalTasks)
+        this.canonicalCursor = {
+          generation: value.canonicalTasks.projectionGeneration,
+          revision: value.canonicalTasks.revision,
+        };
+    }
     this.readRevision = Math.max(this.readRevision, value.revision);
-    this.patch({ snapshot: value });
+    this.patch({ snapshot });
+    return { snapshot, readRequired };
+  }
+  private refreshProjection() {
+    if (this.projectionRefreshPending) {
+      this.projectionRefreshAgain = true;
+      return;
+    }
+    const generation = this.generation;
+    this.projectionRefreshPending = true;
+    void this.readSnapshot().finally(() => {
+      if (generation !== this.generation) return;
+      this.projectionRefreshPending = false;
+      if (this.projectionRefreshAgain) {
+        this.projectionRefreshAgain = false;
+        this.refreshProjection();
+      }
+    });
   }
   async connect() {
     this.disconnect();
@@ -123,7 +184,7 @@ export class PersonalAgentClient {
         throw new Error("This native build does not support personal agents.");
       this.readRevision = 0;
       this.patch({ hello, snapshot: null, problem: null });
-      await this.refresh();
+      await this.readSnapshot();
       if (generation !== this.generation) return;
       const source = this.transport.events();
       this.source = source;
@@ -131,24 +192,29 @@ export class PersonalAgentClient {
         if (generation === this.generation) void this.refresh();
       };
       source.onerror = () => {
-        if (generation === this.generation)
+        if (generation === this.generation) {
+          // EventSource can reconnect with the same durable helper ID. Retire this
+          // subscription and every captured callback; Refresh creates a new lifetime.
+          this.disconnect();
           this.patch({
             connected: false,
             problem:
-              "Connection interrupted. Work may continue in TexOS. Reconnecting reads current state.",
+              "Connection interrupted. Work may continue in TexOS. Refresh state to reconnect.",
           });
+        }
       };
       source.onmessage = (event) => {
         if (generation !== this.generation) return;
         try {
-          this.accept(JSON.parse(event.data));
+          const accepted = this.accept(JSON.parse(event.data));
+          if (accepted.readRequired) this.refreshProjection();
           if (!this.requiresFreshRead) this.patch({ connected: true, problem: null });
         } catch {
+          this.disconnect();
           this.patch({
             connected: false,
             problem: "Could not validate agent updates. Refresh state.",
           });
-          source.close();
         }
       };
     } catch (error) {
@@ -163,22 +229,49 @@ export class PersonalAgentClient {
     this.generation += 1;
     this.source?.close();
     this.source = null;
+    this.canonicalCursor = undefined;
+    this.canonicalAwaitingRead = false;
+    this.projectionRefreshPending = false;
+    this.projectionRefreshAgain = false;
+    this.projectionEpoch += 1;
+    this.snapshotReadOrdinal += 1;
+    this.clearCanonicalTasks();
     this.patch({ connected: false, busy: false });
   }
   async refresh() {
+    if (!this.source) return this.connect();
+    return this.readSnapshot();
+  }
+  private async readSnapshot() {
     const generation = this.generation;
+    const ordinal = ++this.snapshotReadOrdinal;
+    const projectionEpoch = this.projectionEpoch;
     try {
       const snapshot = await this.transport.command("agents.snapshot", {}, this.transport.uuid());
-      if (generation !== this.generation) return;
-      this.accept(snapshot);
+      if (
+        generation !== this.generation ||
+        ordinal !== this.snapshotReadOrdinal ||
+        projectionEpoch !== this.projectionEpoch
+      )
+        return;
+      this.accept(snapshot, true);
       this.requiresFreshRead = false;
       this.patch({ connected: true, problem: null });
     } catch (error) {
-      if (generation === this.generation)
+      if (
+        generation === this.generation &&
+        ordinal === this.snapshotReadOrdinal &&
+        projectionEpoch === this.projectionEpoch
+      ) {
+        this.requiresFreshRead = true;
+        this.canonicalAwaitingRead = true;
+        this.projectionEpoch += 1;
+        this.clearCanonicalTasks();
         this.patch({
           connected: false,
           problem: error instanceof Error ? error.message : "Could not refresh agent state.",
         });
+      }
     }
   }
   async command(method: PersonalAgentMethod, params: Record<string, unknown>) {
@@ -195,10 +288,11 @@ export class PersonalAgentClient {
         "Agent execution is not enabled on this connection. Saved agents and history remain available.",
       );
     const generation = this.generation;
+    const projectionEpoch = this.projectionEpoch;
     const command = decodePersonalAgentCommand({ id: this.transport.uuid(), method, params });
     this.patch({ busy: true, problem: null });
     try {
-      const result = await this.transport.command(method, params, command.id);
+      let result = await this.transport.command(method, params, command.id);
       if (generation !== this.generation)
         throw new Error("Workspace changed while the command was pending.");
       if (!this.state.connected || this.state.snapshot?.revoked)
@@ -223,12 +317,23 @@ export class PersonalAgentClient {
       } else if (method !== "agents.artifact") {
         if (!result || typeof result !== "object" || !("snapshot" in result))
           throw new Error("Missing updated agent state.");
-        this.accept(result.snapshot);
+        if (projectionEpoch !== this.projectionEpoch) {
+          if (!isPersonalAgentSnapshot(result.snapshot))
+            throw new Error("Invalid updated agent state.");
+          result = { ...result, snapshot: withoutPersonalAgentCanonicalTasks(result.snapshot) };
+        } else {
+          const accepted = this.accept(result.snapshot);
+          if (accepted.readRequired) this.refreshProjection();
+          result = { ...result, snapshot: accepted.snapshot };
+        }
       }
       return result;
     } catch (error) {
-      this.requiresFreshRead = true;
-      if (generation === this.generation)
+      if (generation === this.generation) {
+        this.requiresFreshRead = true;
+        this.canonicalAwaitingRead = true;
+        this.projectionEpoch += 1;
+        this.clearCanonicalTasks();
         this.patch({
           connected: false,
           problem:
@@ -236,6 +341,7 @@ export class PersonalAgentClient {
               ? error.message
               : "Outcome is uncertain. Refresh state before new work.",
         });
+      }
       throw error;
     } finally {
       if (generation === this.generation) this.patch({ busy: false });

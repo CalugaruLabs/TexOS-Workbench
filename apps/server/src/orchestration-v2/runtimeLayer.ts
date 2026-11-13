@@ -37,6 +37,7 @@ import * as ProviderContinuationRequests from "@t3tools/provider-core/server/Pro
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
+import * as NativeMissionReadModel from "../nativeTexos/executionReadModel.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
@@ -206,6 +207,18 @@ const layerCheckpointCaptureServiceProvided = CheckpointCaptureService.layer.pip
       layerEventSinkProvided,
       IdAllocator.layer,
       ProjectionStore.layer,
+    ),
+  ),
+);
+export const layerNativeMissionReadModel = NativeMissionReadModel.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerEventSinkProvided,
+      layerProviderEventIngestorProvided,
+      layerCheckpointServiceProvided,
+      layerCheckpointCaptureServiceProvided,
+      ProjectionStore.layer,
+      IdAllocator.layer,
     ),
   ),
 );

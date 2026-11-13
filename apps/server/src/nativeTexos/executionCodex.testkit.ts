@@ -35,6 +35,11 @@ import { ControlledExecutionProvider, ExecutionControlError } from "./executionC
 import { executionEnvelope, type ExecutionIntent } from "./executionProtocol.ts";
 import type { NativeStartAuthorizer } from "./executionControl.ts";
 import type * as Receipts from "./executionReceipts.ts";
+
+const finish: Receipts.ExecutionFinish = {
+  outcome: "completed",
+  answer: { text: "Controlled fixture answer.", truncated: false },
+};
 import { syntheticAuthorization } from "./execution.testkit.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
@@ -418,8 +423,8 @@ export const makeControlledCodexFixture = Effect.fn("ControlledCodexFixture.make
             ).pipe(
               Effect.flatMap((mappings) =>
                 options.holdAttempt
-                  ? Deferred.await(releaseHold).pipe(Effect.as({ mappings, drained: true }))
-                  : Effect.succeed({ mappings, drained: true }),
+                  ? Deferred.await(releaseHold).pipe(Effect.as({ mappings, drained: true, finish }))
+                  : Effect.succeed({ mappings, drained: true, finish }),
               ),
               Effect.catchCause((cause) => {
                 options.onFailure?.(cause);

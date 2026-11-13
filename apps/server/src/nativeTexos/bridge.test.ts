@@ -74,6 +74,72 @@ describe("native private bridge", () => {
     });
   });
 
+  it("an armed bridge binds execution control to the first private hello only", async () => {
+    const p = peer();
+    const handled: Array<{ readonly method: string; readonly authorized: boolean }> = [];
+    p.client.enableExecutionControl(() => ({
+      handle: async (request, authorize) => {
+        handled.push({ method: request.method, authorized: authorize !== undefined });
+        return { capabilities: ["texos.execution.managed-cli.v1"] } as never;
+      },
+      disconnect: async () => {},
+    }));
+    const frame = {
+      version: 2,
+      namespace: "texos.execution",
+      kind: "request",
+      authorityID: "synthetic-authority",
+      hostID: "synthetic-host",
+      hostGeneration: "generation-1",
+    };
+    const refused = once(p.output, "data");
+    p.input.write(
+      JSON.stringify({
+        ...frame,
+        id: randomUUID(),
+        method: "execution.status",
+        params: { commandID: randomUUID(), envelopeDigest: "a".repeat(64) },
+      }) + "\n",
+    );
+    expect(JSON.parse((await refused)[0].toString())).toMatchObject({
+      ok: false,
+      error: { code: "executionUnavailable" },
+    });
+    expect(handled).toEqual([]);
+
+    const hello = once(p.output, "data");
+    p.input.write(
+      JSON.stringify({
+        ...frame,
+        id: randomUUID(),
+        method: "execution.hello",
+        params: { capabilities: ["texos.execution.authorize.v2"] },
+      }) + "\n",
+    );
+    expect(JSON.parse((await hello)[0].toString())).toMatchObject({
+      ok: true,
+      hostGeneration: "generation-1",
+      result: { capabilities: ["texos.execution.managed-cli.v1"] },
+    });
+    expect(handled).toEqual([{ method: "execution.hello", authorized: true }]);
+    expect(() => p.client.enableExecutionControl(() => ({}) as never)).toThrow(
+      "Execution control cannot be rebound.",
+    );
+
+    const closed = once(p.output, "close");
+    p.input.write(
+      JSON.stringify({
+        ...frame,
+        hostGeneration: "generation-2",
+        id: randomUUID(),
+        method: "execution.hello",
+        params: { capabilities: ["texos.execution.authorize.v2"] },
+      }) + "\n",
+    );
+    await closed;
+    expect(handled).toHaveLength(1);
+  });
+
   it("requires versioned hello before create and emits only canonical framed fields", async () => {
     const p = peer();
     const handle = randomUUID();

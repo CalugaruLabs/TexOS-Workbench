@@ -9,6 +9,8 @@ import * as Semaphore from "effect/Semaphore";
 
 import {
   EXECUTION_CAPABILITY,
+  MANAGED_EXECUTION_CAPABILITY,
+  answerPage,
   decodeNativeAuthorization,
   executionEnvelope,
   type ExecutionChannelBinding,
@@ -18,6 +20,7 @@ import {
 } from "./executionProtocol.ts";
 import * as Receipts from "./executionReceipts.ts";
 import { validateExecutionWorktree } from "./executionWorktree.ts";
+import { ManagedExecutionProvider } from "./executionManaged.ts";
 
 export class ExecutionControlError extends Schema.TaggedError<ExecutionControlError>()(
   "ExecutionControlError",
@@ -32,8 +35,13 @@ export type NativeStartAuthorizer = (
 ) => Promise<unknown>;
 
 export interface ControlledExecutionAttempt {
+  /** A drained run reports how it ended and its answer; without both it is uncertain. */
   readonly run: Effect.Effect<
-    { readonly mappings: Receipts.ExecutionMappings; readonly drained: boolean },
+    {
+      readonly mappings: Receipts.ExecutionMappings;
+      readonly drained: boolean;
+      readonly finish?: Receipts.ExecutionFinish;
+    },
     ExecutionControlError
   >;
   readonly stop: Effect.Effect<void, ExecutionControlError>;
@@ -68,13 +76,20 @@ export function executionReceiptView(receipt: Receipts.ExecutionReceipt) {
     phase: receipt.phase,
     mappings: receipt.mappings,
     drained: receipt.drained,
+    outcome: receipt.finish?.outcome ?? null,
     reconciliationRequired: receipt.phase === "uncertain",
   };
 }
 
+const stoppedBeforeStart: Receipts.ExecutionFinish = {
+  outcome: "interrupted",
+  answer: { text: "", truncated: false },
+};
+
 type ReceiptView = ReturnType<typeof executionReceiptView>;
 export type ExecutionControlResult =
   | ReceiptView
+  | (ReceiptView & { readonly answer: ReturnType<typeof answerPage> })
   | { readonly capabilities: readonly string[]; readonly runtimeID?: string }
   | {
       readonly commandID: string;
@@ -108,11 +123,18 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
   const binding = Object.freeze({ ...expectedBinding });
   const receipts = yield* Receipts.ExecutionReceipts;
   const providerOption = yield* Effect.serviceOption(ControlledExecutionProvider);
-  const provider = Option.getOrUndefined(providerOption);
+  const controlled = Option.getOrUndefined(providerOption);
+  const managed = Option.getOrUndefined(yield* Effect.serviceOption(ManagedExecutionProvider));
+  const provider = controlled && managed ? undefined : (controlled ?? managed);
+  const available =
+    provider !== undefined && (provider.mode === "controlled-codex" || provider.available);
+  const capability =
+    provider?.mode === "controlled-codex" ? EXECUTION_CAPABILITY : MANAGED_EXECUTION_CAPABILITY;
   const scope = yield* Scope.Scope;
   const permit = yield* Semaphore.make(1);
   const live = new Map<string, LiveAttempt>();
   let closed = false;
+  // Calling makeExecutionControl activates receipt recovery; provider construction alone does not.
   yield* receipts.recoverInterrupted;
 
   const current = Effect.fn("ExecutionControl.current")(function* (item: LiveAttempt) {
@@ -203,7 +225,7 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
           const saved = yield* current(item);
           if (item.stopRequested || closed) {
             if (saved.phase === "stopping")
-              item.receipt = yield* receipts.transition(saved, "stopped", {}, true);
+              item.receipt = yield* receipts.transition(saved, "stopped", {}, stoppedBeforeStart);
             return false;
           }
           item.receipt = yield* receipts.transition(saved, "starting");
@@ -212,7 +234,7 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
       );
       if (!starting) return;
       yield* gate(item, authorize);
-      if (!provider || provider.mode !== "controlled-codex")
+      if (!provider || !available)
         return yield* new ExecutionControlError({ code: "executionUnavailable" });
       const recordMappings = Effect.fn("ExecutionControl.recordMappings")(
         function* (patch: Receipts.ExecutionMappings) {
@@ -242,15 +264,12 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
         Effect.gen(function* () {
           const latest = yield* current(item);
           if (latest.phase === "uncertain") return;
+          const finish = outcome.drained ? outcome.finish : undefined;
           item.receipt = yield* receipts.transition(
             latest,
-            outcome.drained
-              ? latest.phase === "stopping"
-                ? "stopped"
-                : "attemptFinished"
-              : "uncertain",
+            finish ? (latest.phase === "stopping" ? "stopped" : "attemptFinished") : "uncertain",
             outcome.mappings,
-            outcome.drained,
+            finish,
           );
         }),
       );
@@ -277,7 +296,7 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
                   predecessor,
                   phase,
                   {},
-                  phase === "stopped",
+                  phase === "stopped" ? stoppedBeforeStart : undefined,
                 );
               }),
             )
@@ -309,8 +328,8 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
         return yield* new ExecutionControlError({ code: "staleExecutionAuthority" });
       }
       if (request.method === "execution.hello")
-        return provider?.mode === "controlled-codex" && authorize
-          ? { capabilities: [EXECUTION_CAPABILITY], runtimeID: receipts.runtimeID }
+        return available && authorize
+          ? { capabilities: [capability], runtimeID: receipts.runtimeID }
           : { capabilities: [] };
       if (request.method !== "execution.admit") {
         const saved = yield* receipts.get(
@@ -344,6 +363,35 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
             );
           return executionReceiptView(item.receipt);
         }
+        if (request.method === "execution.reconcile") {
+          if (live.has(saved.intent.commandID))
+            return yield* new ExecutionControlError({ code: "executionNotAbandonable" });
+          return executionReceiptView(
+            yield* receipts.abandon(
+              saved.intent.commandID,
+              saved.envelopeDigest,
+              binding.authorityID,
+              binding.hostGeneration,
+            ),
+          );
+        }
+        if (request.method === "execution.status") {
+          const text =
+            saved.finish?.answer.text ??
+            (provider?.mode === "managed-cli-subscription"
+              ? provider.answer(saved.intent.commandID)
+              : undefined) ??
+            "";
+          return {
+            ...executionReceiptView(saved),
+            answer: answerPage(
+              text,
+              request.params.textOffset ?? 0,
+              saved.finish !== undefined,
+              saved.finish?.answer.truncated ?? false,
+            ),
+          };
+        }
         return executionReceiptView(saved);
       }
       const envelope = yield* Effect.try({
@@ -358,13 +406,18 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
         return yield* new ExecutionControlError({ code: "executionScopeMismatch" });
       const existing = yield* receipts.get(intent.commandID, envelope.digest, binding.authorityID);
       if (existing) return executionReceiptView(existing);
-      if (provider?.mode !== "controlled-codex" || !authorize)
+      if (!provider || !available || !authorize)
         return yield* new ExecutionControlError({ code: "executionUnavailable" });
-      if (intent.configuration.provider !== "codex")
+      if (provider.mode === "controlled-codex" && intent.configuration.provider !== "codex")
         return yield* new ExecutionControlError({ code: "claudeCompletionUnsupported" });
+      if (
+        provider.mode === "managed-cli-subscription" &&
+        !provider.supports(intent.configuration.provider)
+      )
+        return yield* new ExecutionControlError({ code: "managedRouteUnavailable" });
       if (live.size !== 0 || (yield* receipts.hasUnresolved))
         return yield* new ExecutionControlError({ code: "executionCapacityOccupied" });
-      const admitted = yield* receipts.admit(intent);
+      const admitted = yield* receipts.admit(intent, binding.hostGeneration);
       if (!admitted.created) return executionReceiptView(admitted.receipt);
       const item: LiveAttempt = {
         receipt: admitted.receipt,

@@ -12,7 +12,8 @@ import {
   exact,
   identifier,
   object,
-  type ExecutionAuthorizationRequest,
+  type ExecutionNativeRequest,
+  type ExecutionObservationKey,
   type ExecutionChannelBinding,
   type ExecutionHostRequest,
   type ExecutionWireResponse,
@@ -42,13 +43,16 @@ export function executionEndpoint(control: ExecutionControl["Service"]): Private
 export class PrivateExecutionChannel {
   private readonly binding: ExecutionChannelBinding;
   private readonly endpoint: PrivateExecutionEndpoint;
-  private readonly send: (frame: ExecutionWireResponse | ExecutionAuthorizationRequest) => void;
+  private readonly send: (frame: ExecutionWireResponse | ExecutionNativeRequest) => void;
   private readonly fail: () => void;
   private readonly timeoutMs: number;
   private negotiated = false;
   private closed = false;
   private active = 0;
+  // A launch serves a Mission's status reads for as long as it runs, so only the most recent
+  // request IDs are kept to refuse a repeat, never one still being answered.
   private requests = new Set<string>();
+  private inFlight = new Set<string>();
   private expired = new Set<string>();
   private pending = new Map<
     string,
@@ -63,7 +67,7 @@ export class PrivateExecutionChannel {
   constructor(
     binding: ExecutionChannelBinding,
     endpoint: PrivateExecutionEndpoint,
-    send: (frame: ExecutionWireResponse | ExecutionAuthorizationRequest) => void,
+    send: (frame: ExecutionWireResponse | ExecutionNativeRequest) => void,
     fail: () => void,
     timeoutMs = 5000,
   ) {
@@ -89,7 +93,19 @@ export class PrivateExecutionChannel {
     void this.endpoint.disconnect().catch(() => {});
   }
 
-  private authorize: NativeStartAuthorizer = (params, signal) => {
+  private authorize: NativeStartAuthorizer = (params, signal) =>
+    this.nativeRequest("execution.authorizeStart", params, signal);
+
+  /** The native admission's CLI binding for one admitted key; TexOS owns the answer. */
+  readBinding(key: ExecutionObservationKey, signal: AbortSignal): Promise<unknown> {
+    return this.nativeRequest("execution.readBinding", key, signal);
+  }
+
+  private nativeRequest(
+    method: ExecutionNativeRequest["method"],
+    params: ExecutionNativeRequest["params"],
+    signal: AbortSignal,
+  ): Promise<unknown> {
     if (
       this.closed ||
       !this.negotiated ||
@@ -128,15 +144,15 @@ export class PrivateExecutionChannel {
           kind: "request",
           id,
           ...this.binding,
-          method: "execution.authorizeStart",
+          method,
           params,
-        });
+        } as ExecutionNativeRequest);
       } catch {
         expire();
         this.fail();
       }
     });
-  };
+  }
 
   receive(value: unknown) {
     if (this.closed) throw new ExecutionProtocolError("executionChannelDisconnected");
@@ -184,14 +200,13 @@ export class PrivateExecutionChannel {
     const request = decodeExecutionHostRequest(frame);
     if (
       this.active >= 8 ||
-      this.requests.size >= 256 ||
       this.requests.has(request.id) ||
       this.pending.has(request.id) ||
       this.expired.has(request.id)
     ) {
       throw new ExecutionProtocolError("executionRequestLimit");
     }
-    this.requests.add(request.id);
+    this.remember(request.id);
     this.active++;
     if (request.method === "execution.hello") {
       this.negotiated = request.params.capabilities.includes(AUTHORIZATION_CAPABILITY);
@@ -206,7 +221,20 @@ export class PrivateExecutionChannel {
       .catch(() => this.fail())
       .finally(() => {
         this.active--;
+        this.inFlight.delete(request.id);
       });
+  }
+
+  private remember(id: string) {
+    if (this.requests.size >= 256) {
+      for (const old of this.requests) {
+        if (this.inFlight.has(old)) continue;
+        this.requests.delete(old);
+        break;
+      }
+    }
+    this.requests.add(id);
+    this.inFlight.add(id);
   }
 
   private reply(

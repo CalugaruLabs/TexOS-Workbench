@@ -8,7 +8,11 @@ import {
   type PersonalAgentHistoryPage,
   type PersonalAgentRunDetail,
   type PersonalAgentExecutionCapability,
+  type PersonalAgentCanonicalTask,
+  type PersonalAgentNativeDelegation,
+  type PersonalAgentCanonicalTasks,
 } from "@t3tools/contracts";
+import { sha256 as hashSHA256 } from "@noble/hashes/sha2";
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -97,6 +101,335 @@ export function isPersonalAgentHello(value: unknown): value is PersonalAgentHell
     value.capabilities.includes("agents.v2")
   );
 }
+
+const reference = (value: unknown): value is string =>
+  typeof value === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(value);
+const optionalReference = (value: unknown) => value === undefined || reference(value);
+const timestamp = (value: unknown): value is number =>
+  integer(value) && Number(value) <= 8_640_000_000_000_000;
+const phase = (value: unknown) =>
+  ["observed", "attemptStarted", "attemptEnded", "uncertain"].includes(String(value));
+const provider = (value: unknown) => value === "codex" || value === "claudeCode";
+const jsonBytes = (value: unknown) => {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).length;
+  } catch {
+    return Infinity;
+  }
+};
+const sha256 = (value: unknown) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+// Delegation objects are flat, with fixed ASCII keys, references and integer/array values.
+const delegationFingerprint = (value: Record<string, unknown>) =>
+  Array.from(
+    hashSHA256(
+      new TextEncoder().encode(
+        JSON.stringify(
+          Object.fromEntries(
+            Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+          ),
+        ),
+      ),
+    ),
+  )
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+
+function nativeDelegations(value: unknown, snapshot: Record<string, unknown>): boolean {
+  if (value === undefined) return true;
+  if (
+    !record(value) ||
+    value.derivedOnly !== true ||
+    value.authority !== "nativeParent" ||
+    value.completionVerified !== false ||
+    snapshot.mode !== "observeOnly" ||
+    snapshot.executionAvailable !== false ||
+    snapshot.revoked !== false ||
+    !record(value.history) ||
+    value.history.bounded !== true ||
+    value.history.limit !== 100 ||
+    !integer(value.history.total) ||
+    value.history.total > 4096 ||
+    !Array.isArray(value.items) ||
+    value.items.length > 100 ||
+    value.history.returned !== value.items.length ||
+    value.history.total < value.items.length ||
+    !(value.nextBefore == null
+      ? value.history.total === value.items.length
+      : integer(value.nextBefore) &&
+        value.nextBefore > 0 &&
+        value.nextBefore === value.history.total - value.items.length)
+  )
+    return false;
+  const agents = Array.isArray(snapshot.agents) ? snapshot.agents.filter(record) : [];
+  const runs = new Set<string>(),
+    commands = new Set<string>(),
+    children = new Set<string>();
+  const runtimeRuns = new Set<string>();
+  return value.items.every((item: unknown) => {
+    if (!record(item) || !record(item.binding) || !record(item.observation)) return false;
+    const b = item.binding,
+      o = item.observation;
+    if (
+      Object.keys(b).some(
+        (k) =>
+          ![
+            "agentID",
+            "conversationID",
+            "nativeProjectID",
+            "nativeTaskID",
+            "nativeRunID",
+            "nativeCommandID",
+            "nativeParentRunID",
+            "childRunID",
+            "runtimeID",
+            "runtimeRunID",
+            "providerID",
+          ].includes(k),
+      ) ||
+      Object.keys(o).some(
+        (k) =>
+          ![
+            "sequence",
+            "phase",
+            "observedAt",
+            "providerSessionID",
+            "providerTurnID",
+            "artifactRefs",
+          ].includes(k),
+      ) ||
+      ![
+        "agentID",
+        "conversationID",
+        "nativeProjectID",
+        "nativeTaskID",
+        "nativeRunID",
+        "nativeCommandID",
+        "childRunID",
+        "runtimeID",
+        "runtimeRunID",
+      ].every((k) => reference(b[k])) ||
+      !optionalReference(b.nativeParentRunID) ||
+      b.nativeParentRunID === b.nativeRunID ||
+      !provider(b.providerID) ||
+      !sha256(item.bindingFingerprint) ||
+      !sha256(item.observationFingerprint) ||
+      !integer(o.sequence) ||
+      o.sequence < 1 ||
+      !timestamp(o.observedAt) ||
+      !phase(o.phase) ||
+      !optionalReference(o.providerSessionID) ||
+      !optionalReference(o.providerTurnID) ||
+      !Array.isArray(o.artifactRefs) ||
+      o.artifactRefs.length > 16 ||
+      !o.artifactRefs.every(reference) ||
+      new Set(o.artifactRefs).size !== o.artifactRefs.length
+    )
+      return false;
+    const agent = agents.find((a) => a.id === b.agentID);
+    if (
+      !agent ||
+      agent.conversationID !== b.conversationID ||
+      (agent.projectID != null && agent.projectID !== b.nativeProjectID)
+    )
+      return false;
+    if (
+      delegationFingerprint(b) !== item.bindingFingerprint ||
+      delegationFingerprint(o) !== item.observationFingerprint
+    )
+      return false;
+    // Matching correlation fingerprints still never authorize UI actions.
+    for (const [set, id] of [
+      [runs, b.nativeRunID],
+      [commands, b.nativeCommandID],
+      [children, b.childRunID],
+      [runtimeRuns, `${String(b.runtimeID)}|${String(b.runtimeRunID)}`],
+    ] as const) {
+      if (typeof id !== "string" || set.has(id)) return false;
+      set.add(id);
+    }
+    return true;
+  });
+}
+
+function canonicalTasks(value: unknown, snapshot: Record<string, unknown>): boolean {
+  if (value === undefined) return true;
+  if (
+    !record(value) ||
+    value.schemaVersion !== 1 ||
+    !reference(value.projectionGeneration) ||
+    !integer(value.revision) ||
+    value.helperRuntimeID !== snapshot.runtimeID ||
+    value.helperRevision !== snapshot.revision ||
+    !timestamp(value.checkedAtMs) ||
+    !["ready", "unavailable"].includes(String(value.state)) ||
+    jsonBytes(value) > 65_536 ||
+    !record(value.history) ||
+    value.history.bounded !== true ||
+    value.history.taskLimit !== 20 ||
+    value.history.runLimit !== 40 ||
+    typeof value.history.hasMore !== "boolean" ||
+    !Array.isArray(value.items) ||
+    value.items.length > 20 ||
+    value.history.returnedTasks !== value.items.length ||
+    ((value.state === "unavailable" || snapshot.revoked === true) && value.items.length !== 0)
+  )
+    return false;
+  const agents = Array.isArray(snapshot.agents) ? snapshot.agents.filter(record) : [];
+  const taskIDs = new Set<string>(),
+    commandIDs = new Set<string>();
+  const runs = new Map<string, Record<string, unknown>>();
+  let count = 0;
+  for (const task of value.items as unknown[]) {
+    if (
+      !record(task) ||
+      !["agentID", "conversationID", "nativeProjectID", "nativeTaskID"].every((k) =>
+        reference(task[k]),
+      ) ||
+      typeof task.title !== "string" ||
+      !task.title.trim() ||
+      new TextEncoder().encode(task.title).length > 240 ||
+      /[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(task.title) ||
+      !["todo", "working", "needsReview", "completionUnverified"].includes(
+        String(task.displayStatus),
+      ) ||
+      !Array.isArray(task.runs) ||
+      task.runs.length === 0 ||
+      task.runs.length > 40
+    )
+      return false;
+    const agent = agents.find((a) => a.id === task.agentID);
+    if (
+      !agent ||
+      agent.conversationID !== task.conversationID ||
+      (agent.projectID != null && agent.projectID !== task.nativeProjectID)
+    )
+      return false;
+    const taskKey = `${String(task.agentID)}|${String(task.nativeTaskID)}`;
+    if (taskIDs.has(taskKey)) return false;
+    taskIDs.add(taskKey);
+    for (const run of task.runs as unknown[]) {
+      if (
+        !record(run) ||
+        !reference(run.nativeRunID) ||
+        !reference(run.nativeCommandID) ||
+        !optionalReference(run.nativeParentRunID) ||
+        run.nativeParentRunID === run.nativeRunID ||
+        !provider(run.providerID) ||
+        !["root", "included", "outsideWindow"].includes(String(run.parentVisibility)) ||
+        (run.parentVisibility === "root") !== (run.nativeParentRunID === undefined) ||
+        ![
+          "reserved",
+          "dispatching",
+          "acknowledged",
+          "attemptFinished",
+          "verified",
+          "uncertain",
+        ].includes(String(run.commandState)) ||
+        !["unverified", "reviewed"].includes(String(run.resultReview)) ||
+        (run.resultReview === "reviewed" && run.commandState !== "verified") ||
+        !optionalReference(run.reportedChildRunID) ||
+        runs.has(run.nativeRunID) ||
+        commandIDs.has(run.nativeCommandID)
+      )
+        return false;
+      if (run.attemptObservation !== undefined) {
+        const o = run.attemptObservation;
+        if (
+          !record(o) ||
+          !phase(o.phase) ||
+          !integer(o.sequence) ||
+          o.sequence < 1 ||
+          !timestamp(o.observedAtMs)
+        )
+          return false;
+      }
+      if (run.executionBinding !== undefined) {
+        const b = run.executionBinding;
+        if (
+          !record(b) ||
+          !reference(b.runtimeID) ||
+          !reference(b.runtimeRunID) ||
+          !optionalReference(b.providerSessionID) ||
+          !["current", "lastRecorded", "unknown"].includes(String(b.channelPresence))
+        )
+          return false;
+      }
+      if (run.providerAttempt !== undefined) {
+        const p = run.providerAttempt;
+        if (
+          !record(p) ||
+          !reference(p.threadID) ||
+          !reference(p.sessionID) ||
+          !optionalReference(p.turnID)
+        )
+          return false;
+      }
+      runs.set(run.nativeRunID, run);
+      commandIDs.add(run.nativeCommandID);
+      if (++count > 40) return false;
+    }
+  }
+  for (const run of runs.values()) {
+    if (run.nativeParentRunID === undefined) continue;
+    if ((run.parentVisibility === "included") !== runs.has(String(run.nativeParentRunID)))
+      return false;
+    const visited = new Set<string>([String(run.nativeRunID)]);
+    let parent: unknown = run.nativeParentRunID;
+    while (typeof parent === "string" && runs.has(parent)) {
+      if (visited.has(parent)) return false;
+      visited.add(parent);
+      parent = runs.get(parent)?.nativeParentRunID;
+    }
+  }
+  return value.history.returnedRuns === count;
+}
+
+export const personalAgentCanonicalTaskStatus = (
+  status: PersonalAgentCanonicalTask["displayStatus"],
+) =>
+  ({
+    todo: "To do",
+    working: "In progress",
+    needsReview: "Needs review",
+    completionUnverified: "Completion needs checking",
+  })[status];
+export const personalAgentAttemptPhaseLabel = (
+  status: PersonalAgentNativeDelegation["observation"]["phase"],
+) =>
+  ({
+    observed: "Attempt recorded",
+    attemptStarted: "Last recorded: started",
+    attemptEnded: "Attempt ended",
+    uncertain: "Outcome unknown",
+  })[status];
+
+export interface PersonalAgentCanonicalCursor {
+  generation: string;
+  revision: number;
+}
+/** A fresh read may establish a generation; an unsolicited event cannot replace one. */
+export function personalAgentCanonicalFreshness(
+  next: PersonalAgentCanonicalTasks | undefined,
+  previous: PersonalAgentCanonicalCursor | undefined,
+  freshRead: boolean,
+): "accept" | "absent" | "stale" | "readRequired" {
+  if (!next) return "absent";
+  if (previous?.generation === next.projectionGeneration)
+    return next.revision < previous.revision ? "stale" : "accept";
+  return freshRead ? "accept" : "readRequired";
+}
+
+export const personalAgentPlainLabel = (value: string) =>
+  value.replace(/[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, "");
+
+export function withoutPersonalAgentCanonicalTasks(
+  snapshot: PersonalAgentSnapshot,
+): PersonalAgentSnapshot {
+  const visible = { ...snapshot };
+  delete visible.canonicalTasks;
+  return visible;
+}
+
 export function isPersonalAgentSnapshot(value: unknown): value is PersonalAgentSnapshot {
   if (
     !record(value) ||
@@ -166,7 +499,9 @@ export function isPersonalAgentSnapshot(value: unknown): value is PersonalAgentS
         history.bounded === true &&
         ["totalRuns", "totalMessages", "runLimit", "messageLimit", "textLimit"].every((key) =>
           integer(history[key]),
-        )))
+        ))) &&
+    nativeDelegations(value.nativeDelegations, value) &&
+    canonicalTasks(value.canonicalTasks, value)
   );
 }
 const readSnapshot = (value: Record<string, unknown>) => ({

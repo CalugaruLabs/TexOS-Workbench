@@ -1,6 +1,7 @@
 import { expect, it } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import type { PersonalAgentSnapshot } from "@t3tools/contracts";
+import canonicalSnapshot from "../../../../../packages/contracts/test-fixtures/personal-agent-canonical-tasks.json" with { type: "json" };
 import { act, render } from "../../../test/render";
 import { NativePersonalAgents } from "./NativePersonalAgents";
 import {
@@ -209,10 +210,57 @@ function fixture(
       return { snapshot: structuredClone(snapshot) };
     },
   });
-  return { client, commands };
+  return { client, commands, snapshot, stream };
 }
 
-it("shows native agents, verified results, approvals and follow-up without provider dispatch", async () => {
+it("shows shared tasks and provider children without treating an ended attempt as task completion", async () => {
+  const f = fixture();
+  Object.assign(f.snapshot, structuredClone(canonicalSnapshot));
+  await page.viewport(1200, 900);
+  await using screen = await render(<NativePersonalAgents client={f.client} />, { router: false });
+  await screen.getByRole("button", { name: "Agents", exact: true }).click();
+  await expect
+    .element(page.getByRole("heading", { name: "Prepare the synthetic brief", exact: true }))
+    .toBeVisible();
+  await expect.element(page.getByText("In progress", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("Codex · Attempt ended", { exact: true })).toBeVisible();
+  await expect
+    .element(page.getByText("Claude Code · Attempt ended", { exact: true }))
+    .toBeVisible();
+  await expect.element(page.getByText("Reviewed result", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("Result needs checking", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("Attempt finished", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("Done", { exact: true })).not.toBeInTheDocument();
+  await expect.element(page.getByRole("button", { name: "Open task" })).not.toBeInTheDocument();
+  await expect
+    .poll(() => {
+      const popup = document.querySelector('[data-slot="dialog-popup"]');
+      return popup ? getComputedStyle(popup).opacity : null;
+    })
+    .toBe("1");
+  await page.screenshot({ path: "../../../../../.t3/canonical-task-ui-fixture.png" });
+  const native = f.snapshot.canonicalTasks;
+  if (!native) throw new Error("Missing native fixture");
+  await act(async () => {
+    native.revision += 1;
+    native.items[0]!.title = "<img src=x onerror=alert(1)>";
+    native.items[0]!.displayStatus = "completionUnverified";
+    (f.stream.onmessage as ((event: MessageEvent) => void) | null)?.(
+      new MessageEvent("message", { data: JSON.stringify(f.snapshot) }),
+    );
+  });
+  await expect
+    .element(page.getByRole("heading", { name: "<img src=x onerror=alert(1)>", exact: true }))
+    .toBeVisible();
+  await expect.element(page.getByText("Completion needs checking", { exact: true })).toBeVisible();
+  expect(document.querySelector("img[onerror]")).toBeNull();
+  expect(f.snapshot.revision).toBe(1);
+  expect(
+    f.commands.every((command) => ["agents.hello", "agents.snapshot"].includes(command.method)),
+  ).toBe(true);
+});
+
+it("shows saved agents, results, approvals and follow-up without provider dispatch", async () => {
   const f = fixture();
   await page.viewport(1200, 900);
   // This component has no routing dependencies; its native transport is injected for synthetic proof.

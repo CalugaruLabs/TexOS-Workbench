@@ -5,6 +5,8 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { texosMissionThreadId } from "@t3tools/shared/texosMission";
+
 import { exact, executionEnvelope, identifier, type ExecutionIntent } from "./executionProtocol.ts";
 
 export type ExecutionPhase =
@@ -15,7 +17,19 @@ export type ExecutionPhase =
   | "attemptFinished"
   | "stopped"
   | "denied"
-  | "uncertain";
+  | "uncertain"
+  | "abandoned";
+export type ExecutionOutcome = "completed" | "failed" | "interrupted";
+/** The assistant's answer, kept with the receipt so a T3 restart can still return it. */
+export interface ExecutionAnswer {
+  readonly text: string;
+  readonly truncated: boolean;
+}
+export interface ExecutionFinish {
+  readonly outcome: ExecutionOutcome;
+  readonly answer: ExecutionAnswer;
+}
+export const EXECUTION_ANSWER_BYTES = 128 * 1024;
 export interface ExecutionMappings {
   readonly providerThreadID?: string;
   readonly providerTurnID?: string;
@@ -32,6 +46,9 @@ export interface ExecutionReceipt {
   readonly phase: ExecutionPhase;
   readonly mappings: ExecutionMappings;
   readonly drained: boolean;
+  /** The TexOS launch of T3 that admitted this run; `pre-071` for receipts written before it. */
+  readonly hostGeneration: string | undefined;
+  readonly finish: ExecutionFinish | undefined;
 }
 
 export class ExecutionReceiptError extends Schema.TaggedError<ExecutionReceiptError>()(
@@ -48,6 +65,7 @@ export class ExecutionReceipts extends Context.Service<
     readonly hasUnresolved: Effect.Effect<boolean, ExecutionReceiptError>;
     readonly admit: (
       intent: ExecutionIntent,
+      hostGeneration: string,
     ) => Effect.Effect<
       { readonly created: boolean; readonly receipt: ExecutionReceipt },
       ExecutionReceiptError
@@ -61,7 +79,14 @@ export class ExecutionReceipts extends Context.Service<
       receipt: ExecutionReceipt,
       phase: ExecutionPhase,
       mappings?: ExecutionMappings,
-      drained?: boolean,
+      finish?: ExecutionFinish,
+    ) => Effect.Effect<ExecutionReceipt, ExecutionReceiptError>;
+    /** Ends an uncertain run that an earlier T3 launch admitted, once TexOS proved that launch gone. */
+    readonly abandon: (
+      commandID: string,
+      digest: string,
+      authorityID: string,
+      currentHostGeneration: string,
     ) => Effect.Effect<ExecutionReceipt, ExecutionReceiptError>;
     readonly recoverInterrupted: Effect.Effect<void, ExecutionReceiptError>;
   }
@@ -80,7 +105,14 @@ interface Row {
   readonly phase: ExecutionPhase;
   readonly mappings_json: string;
   readonly drained: number;
+  readonly host_generation: string | null;
+  readonly outcome: string | null;
+  readonly answer_text: string;
+  readonly answer_truncated: number;
 }
+
+/** The host generation migration 071 gives receipts written before it. */
+export const LEGACY_HOST_GENERATION = "pre-071";
 
 const mappingKeys = [
   "providerThreadID",
@@ -109,6 +141,14 @@ function decodeRow(row: Row): ExecutionReceipt {
     envelope.intent.canonicalRunID !== row.canonical_run_id ||
     envelope.intent.scope.authorityID !== row.authority_id ||
     ![0, 1].includes(row.drained) ||
+    ![0, 1].includes(row.answer_truncated) ||
+    (row.outcome !== null && !["completed", "failed", "interrupted"].includes(row.outcome)) ||
+    // A finished receipt saved before its outcome was recorded (migration 071) has none.
+    (row.outcome !== null
+      ? row.drained !== 1
+      : row.drained === 1 && row.host_generation !== LEGACY_HOST_GENERATION) ||
+    (row.outcome === null && (row.answer_text !== "" || row.answer_truncated !== 0)) ||
+    utf8Bytes(row.answer_text) > EXECUTION_ANSWER_BYTES ||
     ![
       "admitted",
       "starting",
@@ -118,6 +158,7 @@ function decodeRow(row: Row): ExecutionReceipt {
       "stopped",
       "denied",
       "uncertain",
+      "abandoned",
     ].includes(row.phase) ||
     (row.phase === "attemptFinished" || row.phase === "stopped") !== (row.drained === 1)
   ) {
@@ -125,6 +166,7 @@ function decodeRow(row: Row): ExecutionReceipt {
   }
   for (const entry of [row.runtime_id, row.child_id, row.t3_thread_id, row.t3_provider_session_id])
     identifier(entry);
+  if (row.host_generation !== null) identifier(row.host_generation);
   const mappings: unknown = JSON.parse(row.mappings_json);
   if (
     !mappings ||
@@ -145,6 +187,14 @@ function decodeRow(row: Row): ExecutionReceipt {
     phase: row.phase,
     mappings: mappings as ExecutionMappings,
     drained: row.drained === 1,
+    hostGeneration: row.host_generation ?? undefined,
+    finish:
+      row.outcome === null
+        ? undefined
+        : {
+            outcome: row.outcome as ExecutionOutcome,
+            answer: { text: row.answer_text, truncated: row.answer_truncated === 1 },
+          },
   };
 }
 
@@ -194,13 +244,27 @@ const make = Effect.gen(function* () {
     hasUnresolved,
     get,
     admit: Effect.fn("ExecutionReceipts.admit")(
-      function* (input) {
+      function* (input, hostGeneration) {
+        yield* Effect.try({
+          try: () => {
+            identifier(hostGeneration);
+            if (hostGeneration === LEGACY_HOST_GENERATION) throw new Error("reservedGeneration");
+          },
+          catch: () => new ExecutionReceiptError({ code: "invalidExecutionIntent" }),
+        });
         const envelope = yield* Effect.try({
           try: () => executionEnvelope(input),
           catch: () => new ExecutionReceiptError({ code: "invalidExecutionIntent" }),
         });
         const childID = yield* crypto.randomUUIDv4();
-        const t3ThreadID = yield* crypto.randomUUIDv4();
+        const t3ThreadID = yield* Effect.tryPromise({
+          try: () =>
+            texosMissionThreadId(
+              envelope.intent.canonicalTaskID,
+              envelope.intent.canonicalAttemptID,
+            ),
+          catch: () => new ExecutionReceiptError({ code: "invalidExecutionIntent" }),
+        });
         const t3ProviderSessionID = yield* crypto.randomUUIDv4();
         return yield* sql.withTransaction(
           Effect.gen(function* () {
@@ -212,12 +276,24 @@ const make = Effect.gen(function* () {
             if (previous) return { created: false, receipt: previous };
             if (yield* hasUnresolved)
               return yield* new ExecutionReceiptError({ code: "executionCapacityOccupied" });
+            // One admission per TexOS attempt: a retry is a new attempt and gets its own thread.
+            const sameAttempt = yield* sql<{ readonly total: number }>`
+          SELECT COUNT(*) AS total FROM native_execution_receipts WHERE t3_thread_id = ${t3ThreadID}
+        `.pipe(
+              Effect.mapError(
+                () => new ExecutionReceiptError({ code: "executionStorageUnavailable" }),
+              ),
+            );
+            if ((sameAttempt[0]?.total ?? 1) !== 0)
+              return yield* new ExecutionReceiptError({ code: "executionAttemptAlreadyAdmitted" });
             const inserted = yield* sql<{ readonly command_id: string }>`
           INSERT INTO native_execution_receipts
             (command_id, canonical_run_id, authority_id, envelope_digest, envelope_json,
-             runtime_id, child_id, t3_thread_id, t3_provider_session_id, phase, mappings_json, drained)
+             runtime_id, child_id, t3_thread_id, t3_provider_session_id, phase, mappings_json, drained,
+             host_generation)
           VALUES (${envelope.intent.commandID}, ${envelope.intent.canonicalRunID}, ${envelope.intent.scope.authorityID},
-            ${envelope.digest}, ${envelope.json}, ${runtimeID}, ${childID}, ${t3ThreadID}, ${t3ProviderSessionID}, 'admitted', '{}', 0)
+            ${envelope.digest}, ${envelope.json}, ${runtimeID}, ${childID}, ${t3ThreadID}, ${t3ProviderSessionID}, 'admitted', '{}', 0,
+            ${hostGeneration})
           ON CONFLICT(command_id) DO NOTHING RETURNING command_id
         `;
             const receipt = yield* get(
@@ -238,7 +314,8 @@ const make = Effect.gen(function* () {
       ),
     ),
     transition: Effect.fn("ExecutionReceipts.transition")(
-      function* (expected, phase, patch = {}, drained = false) {
+      function* (expected, phase, patch = {}, finish) {
+        const drained = finish !== undefined;
         return yield* sql.withTransaction(
           Effect.gen(function* () {
             const saved = yield* get(
@@ -258,10 +335,11 @@ const make = Effect.gen(function* () {
               stopped: [],
               denied: [],
               uncertain: [],
+              abandoned: [],
             };
             if (
               !edges[saved.phase].includes(phase) ||
-              (drained && !["attemptFinished", "stopped"].includes(phase))
+              drained !== ["attemptFinished", "stopped"].includes(phase)
             ) {
               return yield* new ExecutionReceiptError({ code: "invalidExecutionTransition" });
             }
@@ -286,8 +364,42 @@ const make = Effect.gen(function* () {
               }
             }
             const encodedMappings = yield* encodeMappings(mappings);
-            yield* sql`UPDATE native_execution_receipts SET phase = ${phase}, mappings_json = ${encodedMappings}, drained = ${drained ? 1 : 0} WHERE command_id = ${saved.intent.commandID}`;
-            return { ...saved, phase, mappings, drained };
+            const answer = finish && boundedAnswer(finish.answer);
+            yield* sql`UPDATE native_execution_receipts SET phase = ${phase}, mappings_json = ${encodedMappings}, drained = ${drained ? 1 : 0},
+              outcome = ${finish?.outcome ?? null}, answer_text = ${answer?.text ?? ""}, answer_truncated = ${answer?.truncated ? 1 : 0}
+              WHERE command_id = ${saved.intent.commandID}`;
+            return {
+              ...saved,
+              phase,
+              mappings,
+              drained,
+              finish: finish && answer ? { outcome: finish.outcome, answer } : undefined,
+            };
+          }),
+        );
+      },
+      Effect.mapError((error) =>
+        isExecutionReceiptError(error)
+          ? error
+          : new ExecutionReceiptError({ code: "executionStorageUnavailable" }),
+      ),
+    ),
+    abandon: Effect.fn("ExecutionReceipts.abandon")(
+      function* (commandID, digest, authorityID, currentHostGeneration) {
+        return yield* sql.withTransaction(
+          Effect.gen(function* () {
+            const saved = yield* get(commandID, digest, authorityID);
+            if (!saved)
+              return yield* new ExecutionReceiptError({ code: "missingExecutionReceipt" });
+            if (saved.phase === "abandoned") return saved;
+            if (
+              saved.phase !== "uncertain" ||
+              saved.hostGeneration === undefined ||
+              saved.hostGeneration === currentHostGeneration
+            )
+              return yield* new ExecutionReceiptError({ code: "executionNotAbandonable" });
+            yield* sql`UPDATE native_execution_receipts SET phase = 'abandoned' WHERE command_id = ${commandID} AND phase = 'uncertain'`;
+            return { ...saved, phase: "abandoned" as const };
           }),
         );
       },
@@ -306,6 +418,23 @@ const make = Effect.gen(function* () {
     ),
   });
 });
+
+const encoder = new TextEncoder();
+const utf8Bytes = (text: string) => encoder.encode(text).length;
+
+/** Cuts the answer to the byte cap at a code point, so a saved answer is always valid text. */
+export function boundedAnswer(answer: ExecutionAnswer): ExecutionAnswer {
+  if (utf8Bytes(answer.text) <= EXECUTION_ANSWER_BYTES) return answer;
+  let bytes = 0;
+  let end = 0;
+  for (const point of answer.text) {
+    const size = utf8Bytes(point);
+    if (bytes + size > EXECUTION_ANSWER_BYTES) break;
+    bytes += size;
+    end += point.length;
+  }
+  return { text: answer.text.slice(0, end), truncated: true };
+}
 
 // Uses the supplied T3 SQL writer; this module never opens a database or imports owner data.
 export const layer = Layer.effect(ExecutionReceipts, make);

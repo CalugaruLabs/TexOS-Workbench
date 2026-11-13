@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
+// @effect-diagnostics nodeBuiltinImport:off - Independent test-only digest implementation; no provider or I/O.
+import * as NodeCrypto from "node:crypto";
+import canonicalSnapshot from "../../contracts/test-fixtures/personal-agent-canonical-tasks.json" with { type: "json" };
 import {
   decodePersonalAgentCommand,
   isPersonalAgentHello,
   isPersonalAgentSnapshot,
   isPersonalAgentHistoryPage,
   isPersonalAgentRunDetail,
+  personalAgentCanonicalFreshness,
+  personalAgentPlainLabel,
 } from "./personalAgents.ts";
 
 const id = "00000000-0000-4000-8000-000000000001";
@@ -20,6 +25,189 @@ const snapshot = {
   artifacts: [],
 };
 describe("personal agents presentation contract", () => {
+  it("preserves old snapshots while separating native tasks from ended attempts", () => {
+    expect(isPersonalAgentSnapshot(snapshot)).toBe(true);
+    expect(isPersonalAgentSnapshot(canonicalSnapshot)).toBe(true);
+    const changed = structuredClone(canonicalSnapshot);
+    changed.canonicalTasks.items[0]!.displayStatus = "completionUnverified";
+    expect(isPersonalAgentSnapshot(changed)).toBe(true);
+    expect(canonicalSnapshot.runs[0]!.status).toBe("completed");
+    expect(canonicalSnapshot.canonicalTasks.items[0]!.displayStatus).toBe("working");
+    expect(canonicalSnapshot.canonicalTasks.items[0]!.runs.map((run) => run.providerID)).toEqual([
+      "codex",
+      "claudeCode",
+    ]);
+  });
+  it("rejects malformed, foreign or contradictory native presentation without inventing Done", () => {
+    const mutations: Array<(value: typeof canonicalSnapshot) => void> = [
+      (value) => {
+        value.canonicalTasks.helperRuntimeID = "foreign";
+      },
+      (value) => {
+        value.canonicalTasks.helperRevision = 2;
+      },
+      (value) => {
+        value.canonicalTasks.revision = Number.MAX_SAFE_INTEGER + 1;
+      },
+      (value) => {
+        value.canonicalTasks.checkedAtMs = Infinity;
+      },
+      (value) => {
+        value.canonicalTasks.items[0]!.title = "\u202eSpoofed";
+      },
+      (value) => {
+        value.canonicalTasks.items[0]!.title = "😀".repeat(61);
+      },
+      (value) => {
+        value.canonicalTasks.items[0]!.displayStatus = "done";
+      },
+      (value) => {
+        value.canonicalTasks.items[0]!.conversationID = "foreign";
+      },
+      (value) => {
+        value.canonicalTasks.items[0]!.nativeProjectID = "foreign";
+      },
+      (value) => {
+        value.canonicalTasks.items[0]!.runs[0]!.resultReview = "reviewed";
+      },
+      (value) => {
+        value.canonicalTasks.items[0]!.runs[1]!.nativeCommandID = "command-codex";
+      },
+      (value) => {
+        value.canonicalTasks.items[0]!.runs[1]!.nativeRunID = "run-codex";
+      },
+      (value) => {
+        value.canonicalTasks.items[0]!.runs[1]!.parentVisibility = "root";
+      },
+      (value) => {
+        value.canonicalTasks.items[0]!.runs[1]!.nativeParentRunID = "run-claude";
+      },
+      (value) => {
+        value.canonicalTasks.items[0]!.runs[1]!.nativeParentRunID = "missing";
+      },
+      (value) => {
+        value.canonicalTasks.history.returnedRuns = 1;
+      },
+      (value) => {
+        value.canonicalTasks.state = "unavailable";
+      },
+      (value) => {
+        value.revoked = true;
+      },
+    ];
+    for (const mutate of mutations) {
+      const value = structuredClone(canonicalSnapshot);
+      mutate(value);
+      expect(isPersonalAgentSnapshot(value)).toBe(false);
+    }
+    const withEmoji = structuredClone(canonicalSnapshot);
+    withEmoji.canonicalTasks.items[0]!.title = "Build 👩🏽‍💻";
+    expect(isPersonalAgentSnapshot(withEmoji)).toBe(true);
+    expect(personalAgentPlainLabel("Builder\u202e\n")).toBe("Builder");
+  });
+  it("bounds the added native collection independently of the helper snapshot", () => {
+    const value = structuredClone(canonicalSnapshot);
+    const template = value.canonicalTasks.items[0]!.runs[0]!;
+    const runs = Array.from({ length: 40 }, (_, index) => ({
+      ...structuredClone(template),
+      nativeRunID: `run-${String(index).padStart(3, "0")}-${"r".repeat(240)}`,
+      nativeCommandID: `command-${String(index).padStart(3, "0")}-${"c".repeat(240)}`,
+      reportedChildRunID: "d".repeat(256),
+      providerAttempt: {
+        threadID: "t".repeat(256),
+        sessionID: "s".repeat(256),
+        turnID: "u".repeat(256),
+      },
+      executionBinding: {
+        runtimeID: "h".repeat(256),
+        runtimeRunID: "e".repeat(256),
+        channelPresence: "lastRecorded",
+      },
+    }));
+    const oversized = {
+      ...value,
+      canonicalTasks: {
+        ...value.canonicalTasks,
+        items: [{ ...value.canonicalTasks.items[0]!, runs }],
+        history: { ...value.canonicalTasks.history, returnedRuns: 40 },
+      },
+    };
+    expect(
+      new TextEncoder().encode(JSON.stringify(oversized.canonicalTasks)).length,
+    ).toBeGreaterThan(65536);
+    expect(isPersonalAgentSnapshot(oversized)).toBe(false);
+  });
+  it("validates R2 correlation digests with a separate Node digest oracle", () => {
+    const binding = {
+      agentID: "builder",
+      conversationID: "conversation",
+      nativeProjectID: "project",
+      nativeTaskID: "canonical-task",
+      nativeRunID: "run-codex",
+      nativeCommandID: "command-codex",
+      childRunID: "child",
+      runtimeID: "execution-runtime",
+      runtimeRunID: "executor-codex",
+      providerID: "codex",
+    };
+    const observation = {
+      sequence: 2,
+      phase: "attemptEnded",
+      observedAt: 1800000000000,
+      artifactRefs: [],
+    };
+    const fingerprint = (value: object) =>
+      NodeCrypto.createHash("sha256")
+        .update(JSON.stringify(value, Object.keys(value).sort()))
+        .digest("hex");
+    const item = {
+      binding,
+      observation,
+      bindingFingerprint: fingerprint(binding),
+      observationFingerprint: fingerprint(observation),
+    };
+    const nativeDelegations = {
+      derivedOnly: true,
+      authority: "nativeParent",
+      completionVerified: false,
+      items: [item],
+      nextBefore: null,
+      history: { bounded: true, total: 1, returned: 1, limit: 100 },
+    };
+    const value = {
+      ...structuredClone(canonicalSnapshot),
+      mode: "observeOnly",
+      executionAvailable: false,
+      nativeDelegations,
+    };
+    expect(isPersonalAgentSnapshot(value)).toBe(true);
+    binding.nativeTaskID = "tampered";
+    expect(isPersonalAgentSnapshot(value)).toBe(false);
+    binding.nativeTaskID = "canonical-task";
+    nativeDelegations.completionVerified = true;
+    expect(isPersonalAgentSnapshot(value)).toBe(false);
+  });
+  it("requires an explicit read to establish a projection generation and rejects lower revisions", () => {
+    const tasks = canonicalSnapshot.canonicalTasks;
+    if (!isPersonalAgentSnapshot(canonicalSnapshot) || !canonicalSnapshot.canonicalTasks)
+      throw new Error("Invalid fixture");
+    const current = canonicalSnapshot.canonicalTasks;
+    expect(personalAgentCanonicalFreshness(current, undefined, false)).toBe("readRequired");
+    expect(personalAgentCanonicalFreshness(current, undefined, true)).toBe("accept");
+    const cursor = { generation: current.projectionGeneration, revision: 2 };
+    expect(personalAgentCanonicalFreshness(current, cursor, false)).toBe("stale");
+    expect(personalAgentCanonicalFreshness({ ...current, revision: 3 }, cursor, false)).toBe(
+      "accept",
+    );
+    expect(
+      personalAgentCanonicalFreshness(
+        { ...current, projectionGeneration: "projection-B" },
+        cursor,
+        false,
+      ),
+    ).toBe("readRequired");
+    expect(tasks.revision).toBe(1);
+  });
   it("requires an explicit non-executing observation capability on hello and snapshot", () => {
     const hello = {
       protocolVersion: 2,

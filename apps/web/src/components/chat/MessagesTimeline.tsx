@@ -234,7 +234,7 @@ interface MessagesTimelineProps {
   paintOnly?: boolean;
   /** Off where another region already speaks the thread's status, like a subagent's bar. */
   announceTurnStatus?: boolean;
-  onOpenTurnDiff?: (runId: RunId, filePath?: string) => void;
+  onOpenTurnDiff?: ((runId: RunId, filePath?: string) => void) | undefined;
   onOpenThread: (threadId: OrchestrationV2TurnItem["threadId"]) => void;
   renderHtmlRender?: TimelineRowSharedState["renderHtmlRender"];
   turnItemSource?: TimelineRowSharedState["turnItemSource"];

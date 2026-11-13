@@ -15,7 +15,6 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 
-import Migration from "../persistence/Migrations/070_NativeExecutionReceipts.ts";
 import * as Receipts from "./executionReceipts.ts";
 import { ControlledExecutionProvider, makeExecutionControl } from "./executionControl.ts";
 import { executionEndpoint, PrivateExecutionChannel } from "./executionChannel.ts";
@@ -27,6 +26,7 @@ import {
   type ExecutionChannelBinding,
 } from "./executionProtocol.ts";
 import { makeControlledCodexFixture } from "./executionCodex.testkit.ts";
+import { executionReceiptMigrations as Migration } from "./execution.testkit.ts";
 
 export interface SyntheticDriverBootstrap {
   readonly binding: ExecutionChannelBinding;

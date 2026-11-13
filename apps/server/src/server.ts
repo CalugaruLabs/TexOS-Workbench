@@ -1,6 +1,7 @@
 import * as NativeStartupLayers from "./nativeTexos/StartupLayers.ts";
 import * as NativeAgentsHttp from "./nativeTexos/agentsHttp.ts";
 import * as NativeExecution from "./nativeTexos/executionLive.ts";
+import * as TexosMissionFiles from "./nativeTexos/missionFiles.ts";
 import * as NativeExecutionReceipts from "./nativeTexos/executionReceipts.ts";
 import * as ProviderOrchestrationAdapterInfrastructure from "./provider/ProviderOrchestrationAdapterInfrastructure.ts";
 import { isNativeTexos, nativeHttpAllowed, nativeStartupProblem } from "./nativeTexos/profile.ts";
@@ -634,6 +635,11 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.suspend(() => (isNativeTexos() ? Layer.empty : ReplayMarkers.layer)),
   Layer.effectDiscard(
     Effect.suspend(() => (isNativeTexos() ? Effect.void : ProjectSettingsOverrideSweep.sweep)),
+  ),
+  Layer.suspend(() =>
+    isNativeTexos()
+      ? TexosMissionFiles.layer.pipe(Layer.provide(NativeExecutionReceipts.layer))
+      : TexosMissionFiles.layerUnavailable,
   ),
   Layer.suspend(() =>
     isNativeTexos()

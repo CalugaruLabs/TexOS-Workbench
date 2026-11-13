@@ -7,6 +7,8 @@ import { isTexosMissionId } from "@t3tools/shared/texosMission";
 export const EXECUTION_NAMESPACE = "texos.execution";
 export const EXECUTION_CAPABILITY = "texos.execution.controlled-codex.v2";
 export const MANAGED_EXECUTION_CAPABILITY = "texos.execution.managed-cli.v2";
+/** The engine can issue a read-only sign-in for TexOS's Mission panel. */
+export const MISSION_PANEL_CAPABILITY = "texos.mission-panel.v1";
 export const AUTHORIZATION_CAPABILITY = "texos.execution.authorize.v2";
 export const EXECUTION_FRAME_BYTES = 64 * 1024;
 
@@ -103,6 +105,7 @@ export type ExecutionHostRequest = Frame & {
         readonly method: "execution.stop" | "execution.reconcile";
         readonly params: { readonly commandID: string; readonly envelopeDigest: string };
       }
+    | { readonly method: "execution.panelSignIn"; readonly params: Record<string, never> }
   );
 
 export interface ExecutionAuthorizationRequest extends Frame {
@@ -363,6 +366,9 @@ export function decodeExecutionHostRequest(value: unknown): ExecutionHostRequest
       digestString(params.envelopeDigest);
       break;
     }
+    case "execution.panelSignIn":
+      exact(frame.params, []);
+      break;
     default:
       throw new ExecutionProtocolError("unsupportedExecutionMethod");
   }

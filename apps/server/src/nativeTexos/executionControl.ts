@@ -10,6 +10,7 @@ import * as Semaphore from "effect/Semaphore";
 import {
   EXECUTION_CAPABILITY,
   MANAGED_EXECUTION_CAPABILITY,
+  MISSION_PANEL_CAPABILITY,
   answerPage,
   decodeNativeAuthorization,
   executionEnvelope,
@@ -18,6 +19,10 @@ import {
   type ExecutionIntent,
   type ExecutionAuthorizationRequest,
 } from "./executionProtocol.ts";
+import { AuthOrchestrationReadScope } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+
+import { EnvironmentAuth } from "../auth/EnvironmentAuth.ts";
 import * as Receipts from "./executionReceipts.ts";
 import { validateExecutionWorktree } from "./executionWorktree.ts";
 import { ManagedExecutionProvider } from "./executionManaged.ts";
@@ -91,6 +96,7 @@ export type ExecutionControlResult =
   | ReceiptView
   | (ReceiptView & { readonly answer: ReturnType<typeof answerPage> })
   | { readonly capabilities: readonly string[]; readonly runtimeID?: string }
+  | { readonly credential: string; readonly expiresAtMs: number }
   | {
       readonly commandID: string;
       readonly phase: "unknown";
@@ -130,6 +136,24 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
     provider !== undefined && (provider.mode === "controlled-codex" || provider.available);
   const capability =
     provider?.mode === "controlled-codex" ? EXECUTION_CAPABILITY : MANAGED_EXECUTION_CAPABILITY;
+  const auth = Option.getOrUndefined(yield* Effect.serviceOption(EnvironmentAuth));
+  // The Mission panel only reads: its sign-in can never stop, start or change anything.
+  const panelSignIn =
+    auth && provider?.mode === "managed-cli-subscription"
+      ? auth
+          .createPairingLink({
+            scopes: [AuthOrchestrationReadScope],
+            subject: "texos-mission-panel",
+            label: "TexOS Mission panel",
+          })
+          .pipe(
+            Effect.map((issued) => ({
+              credential: issued.credential,
+              expiresAtMs: DateTime.toEpochMillis(issued.expiresAt),
+            })),
+            Effect.mapError(() => new ExecutionControlError({ code: "panelSignInUnavailable" })),
+          )
+      : undefined;
   const scope = yield* Scope.Scope;
   const permit = yield* Semaphore.make(1);
   const live = new Map<string, LiveAttempt>();
@@ -329,8 +353,16 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
       }
       if (request.method === "execution.hello")
         return available && authorize
-          ? { capabilities: [capability], runtimeID: receipts.runtimeID }
+          ? {
+              capabilities: panelSignIn ? [capability, MISSION_PANEL_CAPABILITY] : [capability],
+              runtimeID: receipts.runtimeID,
+            }
           : { capabilities: [] };
+      if (request.method === "execution.panelSignIn") {
+        if (!panelSignIn || !available || !authorize)
+          return yield* new ExecutionControlError({ code: "executionUnavailable" });
+        return yield* panelSignIn;
+      }
       if (request.method !== "execution.admit") {
         const saved = yield* receipts.get(
           request.params.commandID,

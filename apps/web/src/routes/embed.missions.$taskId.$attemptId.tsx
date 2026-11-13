@@ -3,12 +3,12 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { isTexosMissionId, texosMissionThreadId } from "@t3tools/shared/texosMission";
 import { createFileRoute } from "@tanstack/react-router";
 
-import ChatView from "../components/ChatView";
+import { MissionPanel } from "../components/texosMission/MissionPanel";
 import { SidebarInset } from "../components/ui/sidebar";
 import { useQuietThreadShell } from "../state/entities";
 import { usePrimaryEnvironmentId } from "../state/environments";
 
-// TexOS opens this inside a Mission page: one attempt's coding view, read-only, no app chrome.
+// TexOS's Show code opens this: one attempt's coding view, read-only, no app chrome.
 export const Route = createFileRoute("/embed/missions/$taskId/$attemptId")({
   loader: async ({ params }) =>
     isTexosMissionId(params.taskId) && isTexosMissionId(params.attemptId)
@@ -19,6 +19,7 @@ export const Route = createFileRoute("/embed/missions/$taskId/$attemptId")({
 
 function MissionCodingView() {
   const derivedThreadId = Route.useLoaderData();
+  const { taskId, attemptId } = Route.useParams();
   const threadId = derivedThreadId === null ? null : ThreadId.make(derivedThreadId);
   const environmentId = usePrimaryEnvironmentId();
   const threadRef =
@@ -29,13 +30,7 @@ function MissionCodingView() {
     return <MissionNotice text="The coding view appears once this attempt starts." />;
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden">
-      <ChatView
-        environmentId={threadRef.environmentId}
-        threadId={threadRef.threadId}
-        routeKind="server"
-        reserveTitleBarControlInset={false}
-        embedded
-      />
+      <MissionPanel threadRef={threadRef} taskId={taskId} attemptId={attemptId} />
     </SidebarInset>
   );
 }

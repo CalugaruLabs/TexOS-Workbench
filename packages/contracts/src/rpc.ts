@@ -387,6 +387,13 @@ import {
   SourceControlRepositoryInfo,
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
+import {
+  TexosMissionFilesError,
+  TexosMissionListFilesInput,
+  TexosMissionListFilesResult,
+  TexosMissionReadFileInput,
+  TexosMissionReadFileResult,
+} from "./texosMission.ts";
 import { VcsError } from "./vcs.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
 
@@ -398,6 +405,8 @@ export const WS_METHODS = {
   projectsListIgnoredFiles: "projects.listIgnoredFiles",
   projectsReadFile: "projects.readFile",
   projectsSearchContents: "projects.searchContents",
+  texosMissionListFiles: "texosMission.listFiles",
+  texosMissionReadFile: "texosMission.readFile",
   projectsSearchEntries: "projects.searchEntries",
   projectsWriteFile: "projects.writeFile",
   projectsMutate: "projects.mutate",
@@ -1240,6 +1249,18 @@ const WsProjectsSearchContentsRpc = Rpc.make(WS_METHODS.projectsSearchContents, 
   error: Schema.Union([ProjectSearchContentsError, EnvironmentAuthorizationError]),
 });
 
+const WsTexosMissionListFilesRpc = Rpc.make(WS_METHODS.texosMissionListFiles, {
+  payload: TexosMissionListFilesInput,
+  success: TexosMissionListFilesResult,
+  error: Schema.Union([TexosMissionFilesError, EnvironmentAuthorizationError]),
+});
+
+const WsTexosMissionReadFileRpc = Rpc.make(WS_METHODS.texosMissionReadFile, {
+  payload: TexosMissionReadFileInput,
+  success: TexosMissionReadFileResult,
+  error: Schema.Union([TexosMissionFilesError, EnvironmentAuthorizationError]),
+});
+
 const WsProjectsListEntriesRpc = Rpc.make(WS_METHODS.projectsListEntries, {
   payload: ProjectListEntriesInput,
   success: ProjectListEntriesResult,
@@ -2066,6 +2087,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectCloneCancelRpc,
   WsProjectCloneRetryRpc,
   WsSubscribeProjectClonesRpc,
+  WsTexosMissionListFilesRpc,
+  WsTexosMissionReadFileRpc,
   WsProjectsListEntriesRpc,
   WsProjectsListIgnoredFilesRpc,
   WsProjectsReadFileRpc,

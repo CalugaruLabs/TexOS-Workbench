@@ -143,6 +143,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.projectCloneCancel]: "source-control",
   [WS_METHODS.projectCloneRetry]: "source-control",
   [WS_METHODS.subscribeProjectClones]: "source-control",
+  [WS_METHODS.texosMissionListFiles]: "texos",
+  [WS_METHODS.texosMissionReadFile]: "texos",
   [WS_METHODS.projectsListEntries]: "workspace",
   [WS_METHODS.projectsListIgnoredFiles]: "workspace",
   [WS_METHODS.projectsReadFile]: "workspace",

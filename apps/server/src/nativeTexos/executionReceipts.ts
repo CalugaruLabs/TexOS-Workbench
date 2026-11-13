@@ -75,6 +75,10 @@ export class ExecutionReceipts extends Context.Service<
       digest: string,
       authorityID: string,
     ) => Effect.Effect<ExecutionReceipt | undefined, ExecutionReceiptError>;
+    /** The receipt of the Mission attempt TexOS keyed to this T3 thread, if one was admitted. */
+    readonly getByThread: (
+      t3ThreadID: string,
+    ) => Effect.Effect<ExecutionReceipt | undefined, ExecutionReceiptError>;
     readonly transition: (
       receipt: ExecutionReceipt,
       phase: ExecutionPhase,
@@ -230,6 +234,18 @@ const make = Effect.gen(function* () {
         : new ExecutionReceiptError({ code: "executionStorageUnavailable" }),
     ),
   );
+  const getByThread = Effect.fn("ExecutionReceipts.getByThread")(
+    function* (t3ThreadID: string) {
+      const matches =
+        yield* sql<Row>`SELECT * FROM native_execution_receipts WHERE t3_thread_id = ${t3ThreadID}`;
+      return matches[0] ? yield* decode(matches[0]) : undefined;
+    },
+    Effect.mapError((error) =>
+      isExecutionReceiptError(error)
+        ? error
+        : new ExecutionReceiptError({ code: "executionStorageUnavailable" }),
+    ),
+  );
   const hasUnresolved = sql<{ readonly total: number }>`
     SELECT COUNT(*) AS total FROM native_execution_receipts
     WHERE phase IN ('admitted','starting','running','stopping','uncertain')
@@ -243,6 +259,7 @@ const make = Effect.gen(function* () {
     runtimeID,
     hasUnresolved,
     get,
+    getByThread,
     admit: Effect.fn("ExecutionReceipts.admit")(
       function* (input, hostGeneration) {
         yield* Effect.try({

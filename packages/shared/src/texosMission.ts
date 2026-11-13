@@ -26,3 +26,24 @@ export async function texosMissionThreadId(taskId: string, attemptId: string): P
   const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
+
+const MISSION_EMBED_PATH = /^\/embed\/missions\/([^/?#\\]+)\/([^/?#\\]+)$/u;
+
+/** The Mission panel path TexOS may ask sign-in to land on, or null: nothing else may follow it. */
+export function texosMissionEmbedPath(value: unknown): string | null {
+  // Each part is a whole decoded Mission ID. IDs with `/`, `\` or `..` are refused because the
+  // native HTTP gate refuses their encoded forms, so the page could never load.
+  if (typeof value !== "string" || value.length > 1024) return null;
+  const match = MISSION_EMBED_PATH.exec(value);
+  if (!match) return null;
+  for (const segment of [match[1]!, match[2]!]) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      return null;
+    }
+    if (decoded === "." || /[/\\]|\.\./u.test(decoded) || !isTexosMissionId(decoded)) return null;
+  }
+  return value;
+}

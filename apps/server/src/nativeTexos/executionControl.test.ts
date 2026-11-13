@@ -5,6 +5,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -23,8 +24,11 @@ import {
 import {
   executionEnvelope,
   EXECUTION_CAPABILITY,
+  MANAGED_EXECUTION_CAPABILITY,
+  MISSION_PANEL_CAPABILITY,
   type ExecutionIntent,
 } from "./executionProtocol.ts";
+import { EnvironmentAuth } from "../auth/EnvironmentAuth.ts";
 import {
   syntheticBinding,
   syntheticIntent,
@@ -130,6 +134,73 @@ describe("private admitted execution", () => {
         assert.equal(count.value, 0);
       }).pipe(Effect.scoped, Effect.provide(receiptsLayer)),
   );
+  it.effect("the Mission panel's sign-in can only read, and only on the managed route", () =>
+    Effect.gen(function* () {
+      const intent = yield* physicalIntent;
+      const issued: Array<{ readonly scopes?: ReadonlyArray<string> }> = [];
+      const auth = EnvironmentAuth.of({
+        createPairingLink: (input) =>
+          Effect.sync(() => {
+            issued.push(input ?? {});
+            return {
+              id: "panel-link",
+              credential: "PANELTOKEN23",
+              scopes: input?.scopes ?? [],
+              subject: input?.subject ?? "",
+              createdAt: DateTime.makeUnsafe(0),
+              expiresAt: DateTime.makeUnsafe(300_000),
+            };
+          }),
+      } as Partial<EnvironmentAuth["Service"]> as EnvironmentAuth["Service"]);
+      const managed = ManagedExecutionProvider.of({
+        mode: "managed-cli-subscription",
+        available: true,
+        supports: () => true,
+        create: () => Effect.fail(new ExecutionControlError({ code: "mustNotCreate" })),
+        observation: () => undefined,
+        answer: () => undefined,
+      });
+      const native = authorizer(intent, yield* Clock.currentTimeMillis);
+      const signIn = syntheticRequest("execution.panelSignIn", {}, 11);
+
+      const control = yield* makeExecutionControl(syntheticBinding).pipe(
+        Effect.provideService(ManagedExecutionProvider, managed),
+        Effect.provideService(EnvironmentAuth, auth),
+      );
+      const hello = yield* control.handle(
+        syntheticRequest("execution.hello", { capabilities: [] }),
+        native,
+      );
+      assert.deepEqual("capabilities" in hello && hello.capabilities, [
+        MANAGED_EXECUTION_CAPABILITY,
+        MISSION_PANEL_CAPABILITY,
+      ]);
+      assert.deepEqual(yield* control.handle(signIn, native), {
+        credential: "PANELTOKEN23",
+        expiresAtMs: 300_000,
+      });
+      assert.deepEqual(
+        issued.map((input) => input.scopes),
+        [["orchestration:read"]],
+      );
+      // Without TexOS's start check the engine runs no Mission, so it has no panel either.
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(control.handle(signIn))));
+
+      const controlled = yield* makeExecutionControl(syntheticBinding).pipe(
+        Effect.provideService(ControlledExecutionProvider, unavailableProvider({ value: 0 })),
+        Effect.provideService(EnvironmentAuth, auth),
+      );
+      const plain = yield* controlled.handle(
+        syntheticRequest("execution.hello", { capabilities: [] }),
+        native,
+      );
+      assert.deepEqual("capabilities" in plain && plain.capabilities, [EXECUTION_CAPABILITY]);
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(controlled.handle(signIn, native))));
+      assert.equal(issued.length, 1);
+      assert.throws(() => syntheticRequest("execution.panelSignIn", { scopes: ["*"] }));
+    }).pipe(Effect.scoped, Effect.provide(receiptsLayer)),
+  );
+
   it.effect(
     "missing native authorization or provider handler advertises nothing and starts nothing",
     () =>

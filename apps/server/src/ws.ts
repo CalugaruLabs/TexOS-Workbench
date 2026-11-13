@@ -1,4 +1,5 @@
 import { isNativeTexos } from "./nativeTexos/profile.ts";
+import * as TexosMissionFiles from "./nativeTexos/missionFiles.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -1349,6 +1350,7 @@ export const layerWsRpc = (
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+      const missionFiles = yield* TexosMissionFiles.TexosMissionFiles;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
@@ -2832,6 +2834,8 @@ export const layerWsRpc = (
                 }),
             ),
           ),
+        [WS_METHODS.texosMissionListFiles]: (input) => missionFiles.list(input),
+        [WS_METHODS.texosMissionReadFile]: (input) => missionFiles.read(input),
         [WS_METHODS.projectsListEntries]: (input) =>
           workspaceEntries.list(input).pipe(
             Effect.mapError(

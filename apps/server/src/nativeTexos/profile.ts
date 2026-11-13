@@ -36,6 +36,8 @@ const allowedRpc = new Set([
   "orchestration.subscribeThread",
   "orchestration.getThreadProjection",
   "orchestration.getTurnItem",
+  "texosMission.listFiles",
+  "texosMission.readFile",
 ]);
 export const nativeRpcAllowed = (method: string) => allowedRpc.has(method);
 

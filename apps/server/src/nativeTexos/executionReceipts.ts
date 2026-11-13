@@ -46,7 +46,7 @@ export interface ExecutionReceipt {
   readonly phase: ExecutionPhase;
   readonly mappings: ExecutionMappings;
   readonly drained: boolean;
-  /** The TexOS launch of T3 that admitted this run; absent only on receipts from before 071. */
+  /** The TexOS launch of T3 that admitted this run; `pre-071` for receipts written before it. */
   readonly hostGeneration: string | undefined;
   readonly finish: ExecutionFinish | undefined;
 }
@@ -246,7 +246,10 @@ const make = Effect.gen(function* () {
     admit: Effect.fn("ExecutionReceipts.admit")(
       function* (input, hostGeneration) {
         yield* Effect.try({
-          try: () => identifier(hostGeneration),
+          try: () => {
+            identifier(hostGeneration);
+            if (hostGeneration === LEGACY_HOST_GENERATION) throw new Error("reservedGeneration");
+          },
           catch: () => new ExecutionReceiptError({ code: "invalidExecutionIntent" }),
         });
         const envelope = yield* Effect.try({

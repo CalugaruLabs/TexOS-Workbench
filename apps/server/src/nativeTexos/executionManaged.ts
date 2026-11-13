@@ -805,7 +805,10 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
               if (eventStreamSucceeded && ownedConsumer) publish({ adapterEventDrain: "observed" });
               const final = observations.get(intent.commandID)!;
               const outcome = final.outcome;
+              // A request from Codex is never settled as a finished run, whatever the drain shows.
+              const refusedAny = yield* Deferred.isDone(refused);
               const drained =
+                !refusedAny &&
                 outcome !== "unknown" &&
                 final.closeAndJoin === "observed" &&
                 final.transportAndParserDrain === "observed" &&

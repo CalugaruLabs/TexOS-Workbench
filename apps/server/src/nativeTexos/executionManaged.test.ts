@@ -168,7 +168,12 @@ function managedConfiguration(model: string) {
   };
 }
 
-type CodexFault = "configuration" | "approvalRequest" | "toolCall" | "unknownRequest";
+type CodexFault =
+  | "configuration"
+  | "approvalRequest"
+  | "toolCall"
+  | "unknownRequest"
+  | "undecodableRequest";
 
 // Requests Codex might send mid-turn; a managed run answers each with a refusal and ends.
 const codexRequests = {
@@ -192,7 +197,32 @@ const codexRequests = {
     },
   },
   unknownRequest: { method: "synthetic/unknownRequest", params: {} },
+  // No callId: it fails to decode, so no handler runs and only the request stream sees it.
+  undecodableRequest: {
+    method: "item/tool/call",
+    params: {
+      threadId: "controlled-native-thread",
+      turnId: "controlled-native-turn",
+      tool: "synthetic_tool",
+      arguments: {},
+    },
+  },
 } as const;
+
+const codexRefusals: Record<keyof typeof codexRequests, object> = {
+  approvalRequest: { code: -32001, message: "Refused by native execution" },
+  toolCall: { code: -32001, message: "Refused by native execution" },
+  unknownRequest: { code: -32001, message: "Refused by native execution" },
+  undecodableRequest: {
+    code: -32602,
+    message: "Invalid payload for method 'item/tool/call' during 'decode-payload'",
+    data: {
+      issueCount: 3,
+      issueKinds: ["Composite", "Pointer", "MissingKey"],
+      maximumPathDepth: 1,
+    },
+  },
+};
 
 function codexTranscript(
   intent: ExecutionIntent,
@@ -395,10 +425,7 @@ function codexTurn(
       ? ([
           { type: "emit_inbound", frame: { method: "turn/started", params: started } },
           { type: "emit_inbound", frame: { id: 77, ...codexRequests[fault] } },
-          {
-            type: "expect_outbound",
-            frame: { id: 77, error: { code: -32001, message: "Refused by native execution" } },
-          },
+          { type: "expect_outbound", frame: { id: 77, error: codexRefusals[fault] } },
         ] as const)
       : ([
           {
@@ -788,7 +815,13 @@ describe("control through private binding and actual managed lower adapters", ()
         assert.notEqual(f.managed.observation(f.intent.commandID)?.outcome, "completed");
       }).pipe(Effect.scoped, Effect.provide(layers)),
   );
-  it.effect.each(["configuration", "approvalRequest", "toolCall", "unknownRequest"] as const)(
+  it.effect.each([
+    "configuration",
+    "approvalRequest",
+    "toolCall",
+    "unknownRequest",
+    "undecodableRequest",
+  ] as const)(
     "a managed Codex run refused for %s never settles and leaves the file alone",
     (fault) =>
       Effect.gen(function* () {

@@ -434,6 +434,24 @@ describe("native execution durable receipts", () => {
       );
       assert.equal(abandoned.phase, "abandoned");
       assert.isFalse(yield* store.hasUnresolved);
+      // Only a legacy receipt may be finished without an outcome.
+      yield* sql`UPDATE native_execution_receipts SET host_generation = 'generation-1' WHERE command_id = ${finished.commandID}`;
+      assert.equal((yield* Effect.flip(read(finished))).code, "invalidExecutionReceipt");
+      // A launch can't take the legacy generation as its own.
+      assert.equal(
+        (yield* Effect.flip(
+          store.admit(
+            {
+              ...uncertain,
+              commandID: "00000000-0000-4000-8000-000000000003",
+              canonicalRunID: "canonical-run-3",
+              canonicalAttemptID: "canonical-attempt-3",
+            },
+            Receipts.LEGACY_HOST_GENERATION,
+          ),
+        )).code,
+        "invalidExecutionIntent",
+      );
     }).pipe(Effect.provide(database)),
   );
 });

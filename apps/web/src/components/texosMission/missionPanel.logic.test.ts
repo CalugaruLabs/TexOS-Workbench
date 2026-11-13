@@ -13,7 +13,13 @@ describe("Mission panel", () => {
     expect(defaultMissionTab([edit("completed")], "completed")).toBe("changes");
     expect(defaultMissionTab([edit("failed")], "interrupted")).toBe("changes");
     expect(defaultMissionTab([command], "completed")).toBe("timeline");
-    expect(defaultMissionTab([], null)).toBe("timeline");
+    expect(defaultMissionTab([], "running")).toBe("timeline");
+  });
+
+  it("waits to choose until the run and an ended run's steps have arrived", () => {
+    expect(defaultMissionTab([], null)).toBeNull();
+    expect(defaultMissionTab([edit("completed")], null)).toBeNull();
+    expect(defaultMissionTab([], "completed")).toBeNull();
   });
 
   it("re-reads the folder when an edit starts or lands and when the run moves, not otherwise", () => {

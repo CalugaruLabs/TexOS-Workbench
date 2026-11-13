@@ -52,7 +52,8 @@ export function MissionPanel(props: MissionRef) {
   const [chosen, setChosen] = useState<MissionPanelTab | null>(null);
   // Picked once the run is known, then kept, so a run that ends never pulls the view away.
   const [opened, setOpened] = useState<MissionPanelTab | null>(null);
-  if (opened === null && status !== null) setOpened(defaultMissionTab(items, status));
+  const first = opened === null ? defaultMissionTab(items, status) : null;
+  if (first !== null) setOpened(first);
   const tab = chosen ?? opened ?? "timeline";
 
   return (

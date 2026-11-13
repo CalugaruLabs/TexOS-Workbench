@@ -36,12 +36,18 @@ function countFileEdits(items: ReadonlyArray<PanelItem>) {
   return { edits, settled };
 }
 
-/** A running Mission shows what it is doing; one that ended with files shows what it left. */
+/**
+ * A running Mission shows what it is doing; one that ended with files shows what it left. Null
+ * until both the run and, for an ended one, its steps have arrived: they come on separate streams.
+ */
 export function defaultMissionTab(
   items: ReadonlyArray<PanelItem>,
   status: OrchestrationV2RunStatus | null,
-): MissionPanelTab {
-  return missionRunEnded(status) && countFileEdits(items).edits > 0 ? "changes" : "timeline";
+): MissionPanelTab | null {
+  if (status === null) return null;
+  if (!missionRunEnded(status)) return "timeline";
+  if (items.length === 0) return null;
+  return countFileEdits(items).edits > 0 ? "changes" : "timeline";
 }
 
 /** Moves whenever a file edit starts or lands, or the run moves: the only times the folder can differ. */

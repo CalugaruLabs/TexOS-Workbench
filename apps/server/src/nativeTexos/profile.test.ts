@@ -111,6 +111,13 @@ describe("bounded embedded profile", () => {
       expect(nativeHttpAllowed("GET", path)).toBe(false);
     expect(nativeHttpAllowed("POST", "/assets/client.js")).toBe(false);
   });
+  it("lets TexOS's Mission panel sign in and land on its view", () => {
+    // WorkbenchServer.missionPanelURL in TexOS for "task-1" and "attempt 2 é", less its fragment.
+    expect(
+      nativeHttpAllowed("GET", "/pair?next=/embed/missions/task-1/attempt%25202%2520%25C3%25A9"),
+    ).toBe(true);
+    expect(nativeHttpAllowed("GET", "/embed/missions/task-1/attempt%202%20%C3%A9")).toBe(true);
+  });
 });
 
 it("requires private descriptors, loopback, bundled assets and no owner-store/cwd bootstrap before startup", () => {

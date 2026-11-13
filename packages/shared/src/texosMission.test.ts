@@ -30,13 +30,17 @@ describe("texosMissionThreadId", () => {
 
 describe("texosMissionEmbedPath", () => {
   it("accepts only a Mission panel path on this server", () => {
-    const encoded = `/embed/missions/${encodeURIComponent("Tâche/路径")}/${encodeURIComponent("a b")}`;
+    const encoded = `/embed/missions/${encodeURIComponent("Tâche 路径")}/${encodeURIComponent("a b")}`;
     expect(texosMissionEmbedPath("/embed/missions/task-1/attempt-1")).toBe(
       "/embed/missions/task-1/attempt-1",
     );
     expect(texosMissionEmbedPath(encoded)).toBe(encoded);
-    // The path TexOS's WorkbenchServer.missionPanelURL builds for "task-1" and "attempt/2 é".
-    const fromTexos = "/embed/missions/task-1/attempt%2F2%20%C3%A9";
+    // The query TexOS's WorkbenchServer.missionPanelURL builds for "task-1" and "attempt 2 é",
+    // read the way the router reads it.
+    const fromTexos = new URLSearchParams(
+      "next=/embed/missions/task-1/attempt%25202%2520%25C3%25A9",
+    ).get("next");
+    expect(fromTexos).toBe("/embed/missions/task-1/attempt%202%20%C3%A9");
     expect(texosMissionEmbedPath(fromTexos)).toBe(fromTexos);
     for (const next of [
       undefined,
@@ -48,6 +52,10 @@ describe("texosMissionEmbedPath", () => {
       "/embed/missions/a/b#token=x",
       "/embed/missions/../b",
       "/embed/missions/%2e%2e/b",
+      "/embed/missions/a%2Fb/c",
+      "/embed/missions/a%5Cb/c",
+      "/embed/missions/a..b/c",
+      "/embed/missions/a%2E%2Eb/c",
       "/embed/missions/a\\b/c",
       "/embed/missions/%E0%A4%A/b",
       "/embed/missions/%20padded/b",

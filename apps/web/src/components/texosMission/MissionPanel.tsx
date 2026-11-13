@@ -50,7 +50,10 @@ export function MissionPanel(props: MissionRef) {
   const status = useQuietThreadShell(props.threadRef)?.latestRun?.status ?? null;
   const items = useQuietThreadVisibleTurnItems(props.threadRef);
   const [chosen, setChosen] = useState<MissionPanelTab | null>(null);
-  const tab = chosen ?? defaultMissionTab(items, status);
+  // Picked once the run is known, then kept, so a run that ends never pulls the view away.
+  const [opened, setOpened] = useState<MissionPanelTab | null>(null);
+  if (opened === null && status !== null) setOpened(defaultMissionTab(items, status));
+  const tab = chosen ?? opened ?? "timeline";
 
   return (
     <div className="flex h-full min-h-0 flex-col">

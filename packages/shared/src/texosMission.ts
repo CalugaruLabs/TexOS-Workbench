@@ -31,7 +31,8 @@ const MISSION_EMBED_PATH = /^\/embed\/missions\/([^/?#\\]+)\/([^/?#\\]+)$/u;
 
 /** The Mission panel path TexOS may ask sign-in to land on, or null: nothing else may follow it. */
 export function texosMissionEmbedPath(value: unknown): string | null {
-  // Each part is a whole decoded Mission ID, so an encoded `/` or `.` can't leave the route.
+  // Each part is a whole decoded Mission ID. IDs with `/`, `\` or `..` are refused because the
+  // native HTTP gate refuses their encoded forms, so the page could never load.
   if (typeof value !== "string" || value.length > 1024) return null;
   const match = MISSION_EMBED_PATH.exec(value);
   if (!match) return null;
@@ -42,7 +43,7 @@ export function texosMissionEmbedPath(value: unknown): string | null {
     } catch {
       return null;
     }
-    if (decoded === "." || decoded === ".." || !isTexosMissionId(decoded)) return null;
+    if (decoded === "." || /[/\\]|\.\./u.test(decoded) || !isTexosMissionId(decoded)) return null;
   }
   return value;
 }

@@ -134,6 +134,14 @@ export async function readMissionFile(
 ): Promise<TexosMissionReadFileResult> {
   const segments = missionFileSegments(path);
   if (!segments) throw new Refused("invalidPath");
+  // O_NOFOLLOW checks only the last part. macOS's O_NOFOLLOW_ANY covers the folders on the way;
+  // elsewhere this narrows, but cannot close, the window in which one becomes a link.
+  let parent = root;
+  for (const segment of segments.slice(0, -1)) {
+    parent = NodePath.join(parent, segment);
+    if (!(await NodeFSP.lstat(parent).catch(() => undefined))?.isDirectory())
+      throw new Refused("notFound");
+  }
   const handle = await NodeFSP.open(NodePath.join(root, ...segments), flags).catch(() => {
     throw new Refused("notFound");
   });
@@ -176,7 +184,12 @@ const make = Effect.gen(function* () {
     const receipt = yield* receipts
       .getByThread(threadId)
       .pipe(Effect.mapError(() => fail("unavailable", "Mission records are unavailable.")));
-    if (!receipt) return yield* fail("notFound", "This engine has no run for this Mission.");
+    if (
+      !receipt ||
+      receipt.intent.canonicalTaskID !== input.taskId ||
+      receipt.intent.canonicalAttemptID !== input.attemptId
+    )
+      return yield* fail("notFound", "This engine has no run for this Mission.");
     const tree = receipt.intent.worktree;
     yield* validateExecutionWorktree(tree).pipe(
       Effect.mapError(() => fail("folderChanged", "The Mission's folder is no longer there.")),

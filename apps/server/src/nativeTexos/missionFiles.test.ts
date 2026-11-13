@@ -113,8 +113,11 @@ describe("Mission file reads", () => {
     await NodeFSP.symlink(NodePath.join(parent, "secret.txt"), NodePath.join(root, "link.txt"));
     await NodeFSP.link(NodePath.join(parent, "secret.txt"), NodePath.join(root, "hard.txt"));
     await NodeFSP.mkdir(NodePath.join(root, "folder"));
+    // A folder on the way that is a link, which O_NOFOLLOW alone would follow on Linux.
+    await NodeFSP.symlink(parent, NodePath.join(root, "through"));
 
     assert.equal(await failureOf(readMissionFile(root, device, "link.txt")), "notFound");
+    assert.equal(await failureOf(readMissionFile(root, device, "through/secret.txt")), "notFound");
     assert.equal(await failureOf(readMissionFile(root, device, "hard.txt")), "unreadable");
     assert.equal(await failureOf(readMissionFile(root, device, "folder")), "unreadable");
     assert.equal(await failureOf(readMissionFile(root, device, "../secret.txt")), "invalidPath");

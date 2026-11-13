@@ -2,12 +2,15 @@ import * as Schema from "effect/Schema";
 
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
+// Names a file or a Mission exactly as it is, so two names that differ only in spaces stay two.
+const ExactName = Schema.String.check(Schema.isNonEmpty());
+
 /** Above this size a Mission file is listed but its text is not sent. */
 export const TEXOS_MISSION_FILE_BYTES = 512 * 1024;
 
 const MissionIdentity = {
-  taskId: TrimmedNonEmptyString,
-  attemptId: TrimmedNonEmptyString,
+  taskId: ExactName,
+  attemptId: ExactName,
   /** Changes only the client's cache key; the server always reads the folder as it is now. */
   revision: Schema.optional(Schema.String),
 };
@@ -17,7 +20,7 @@ export type TexosMissionListFilesInput = typeof TexosMissionListFilesInput.Type;
 
 export const TexosMissionFile = Schema.Struct({
   /** Relative to the Mission's folder, with `/` separators. */
-  path: TrimmedNonEmptyString,
+  path: ExactName,
   byteLength: NonNegativeInt,
   changedAtMs: NonNegativeInt,
 });
@@ -32,7 +35,7 @@ export type TexosMissionListFilesResult = typeof TexosMissionListFilesResult.Typ
 
 export const TexosMissionReadFileInput = Schema.Struct({
   ...MissionIdentity,
-  path: TrimmedNonEmptyString,
+  path: ExactName,
 });
 export type TexosMissionReadFileInput = typeof TexosMissionReadFileInput.Type;
 

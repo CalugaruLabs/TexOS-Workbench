@@ -189,6 +189,8 @@ describe("managed Codex profile", () => {
       };
       await refused(thread({ instructionSources: [other] }));
       await refused(thread({ instructionSources: [link] }));
+      await refused(thread({ instructionSources: undefined }));
+      await refused(thread({ instructionSources: null }));
       await refused(thread({ approvalPolicy: "on-request" }));
       await refused(thread({ modelProvider: "azure" }));
       await refused(thread({ model: "gpt-5.4-mini" }));

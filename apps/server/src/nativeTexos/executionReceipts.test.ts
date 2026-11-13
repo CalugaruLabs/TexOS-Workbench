@@ -384,40 +384,56 @@ describe("native execution durable receipts", () => {
     }).pipe(Effect.provide(receiptsLayer)),
   );
 
-  it.effect("receipts written before the outcome columns keep their phase and stay readable", () =>
+  it.effect("receipts written before the outcome columns stay readable and can be reconciled", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* Migration070;
-      const intent = syntheticIntent();
-      const envelope = executionEnvelope(intent);
+      const uncertain = syntheticIntent();
+      const finished = {
+        ...uncertain,
+        commandID: "00000000-0000-4000-8000-000000000002",
+        canonicalRunID: "canonical-run-2",
+        canonicalAttemptID: "canonical-attempt-2",
+      };
       yield* sql`INSERT INTO native_execution_runtime(singleton, runtime_id) VALUES (1, 'runtime-before')`;
-      yield* sql`
-        INSERT INTO native_execution_receipts
-          (command_id, canonical_run_id, authority_id, envelope_digest, envelope_json, runtime_id,
-           child_id, t3_thread_id, t3_provider_session_id, phase, mappings_json, drained)
-        VALUES (${intent.commandID}, ${intent.canonicalRunID}, ${intent.scope.authorityID},
-          ${envelope.digest}, ${envelope.json}, 'runtime-before', 'child-before', 'thread-before',
-          'session-before', 'uncertain', '{}', 0)
-      `;
+      for (const [intent, phase, drained] of [
+        [uncertain, "uncertain", 0],
+        [finished, "attemptFinished", 1],
+      ] as const) {
+        const envelope = executionEnvelope(intent);
+        yield* sql`
+          INSERT INTO native_execution_receipts
+            (command_id, canonical_run_id, authority_id, envelope_digest, envelope_json, runtime_id,
+             child_id, t3_thread_id, t3_provider_session_id, phase, mappings_json, drained)
+          VALUES (${intent.commandID}, ${intent.canonicalRunID}, ${intent.scope.authorityID},
+            ${envelope.digest}, ${envelope.json}, 'runtime-before', ${`child-${phase}`},
+            ${`thread-${phase}`}, ${`session-${phase}`}, ${phase}, '{}', ${drained})
+        `;
+      }
       yield* Migration071;
       const store = yield* Receipts.ExecutionReceipts.pipe(
         Effect.provide(Receipts.layer.pipe(Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)))),
       );
-      const saved = yield* store.get(intent.commandID, envelope.digest, intent.scope.authorityID);
+      const read = (intent: typeof uncertain) =>
+        store.get(intent.commandID, executionEnvelope(intent).digest, intent.scope.authorityID);
+      const done = yield* read(finished);
+      assert.equal(done?.phase, "attemptFinished");
+      assert.isTrue(done?.drained);
+      assert.equal(done?.hostGeneration, Receipts.LEGACY_HOST_GENERATION);
+      assert.isUndefined(done?.finish);
+      const saved = yield* read(uncertain);
       assert.equal(saved?.phase, "uncertain");
-      assert.isUndefined(saved?.hostGeneration);
+      assert.equal(saved?.hostGeneration, Receipts.LEGACY_HOST_GENERATION);
       assert.isUndefined(saved?.finish);
-      assert.equal(
-        (yield* Effect.flip(
-          store.abandon(
-            intent.commandID,
-            envelope.digest,
-            intent.scope.authorityID,
-            "generation-2",
-          ),
-        )).code,
-        "executionNotAbandonable",
+      assert.isTrue(yield* store.hasUnresolved);
+      const abandoned = yield* store.abandon(
+        uncertain.commandID,
+        executionEnvelope(uncertain).digest,
+        uncertain.scope.authorityID,
+        "generation-2",
       );
+      assert.equal(abandoned.phase, "abandoned");
+      assert.isFalse(yield* store.hasUnresolved);
     }).pipe(Effect.provide(database)),
   );
 });

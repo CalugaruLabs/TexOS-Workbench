@@ -274,7 +274,8 @@ export async function checkManagedCodexThread(
     thread.modelProvider !== "openai"
   )
     throw new ManagedCodexProfileError("threadSettingsChanged");
-  const sources = thread.instructionSources ?? [];
+  // A Codex that doesn't report what it loaded can't prove it loaded nothing unapproved.
+  const sources = thread.instructionSources;
   if (!Array.isArray(sources)) throw new ManagedCodexProfileError("instructionSourcesUnreadable");
   for (const source of sources) {
     const approved = restrictions.approvedInstructionSources.find(

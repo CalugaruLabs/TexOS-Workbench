@@ -111,6 +111,9 @@ interface Row {
   readonly answer_truncated: number;
 }
 
+/** The host generation migration 071 gives receipts written before it. */
+export const LEGACY_HOST_GENERATION = "pre-071";
+
 const mappingKeys = [
   "providerThreadID",
   "providerTurnID",
@@ -140,7 +143,10 @@ function decodeRow(row: Row): ExecutionReceipt {
     ![0, 1].includes(row.drained) ||
     ![0, 1].includes(row.answer_truncated) ||
     (row.outcome !== null && !["completed", "failed", "interrupted"].includes(row.outcome)) ||
-    (row.outcome !== null) !== (row.drained === 1) ||
+    // A finished receipt saved before its outcome was recorded (migration 071) has none.
+    (row.outcome !== null
+      ? row.drained !== 1
+      : row.drained === 1 && row.host_generation !== LEGACY_HOST_GENERATION) ||
     (row.outcome === null && (row.answer_text !== "" || row.answer_truncated !== 0)) ||
     utf8Bytes(row.answer_text) > EXECUTION_ANSWER_BYTES ||
     ![

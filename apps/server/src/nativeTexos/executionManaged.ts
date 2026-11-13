@@ -20,6 +20,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as CodexError from "effect-codex-app-server/errors";
+import { SERVER_REQUEST_PARAMS } from "effect-codex-app-server/rpc";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -185,7 +186,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
     ),
   });
   const observations = new Map<string, ManagedExecutionObservation>();
-  const answers = new Map<string, string>();
+  const answers = new Map<string, Receipts.ExecutionAnswer>();
   const checkExecutableFile = makeExecutableCheck();
   const supports = (provider: "codex" | "claudeCode") =>
     bindings.available &&
@@ -196,7 +197,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
       bindings.available && (transports?.codex !== undefined || transports?.claude !== undefined),
     supports,
     observation: (id) => observations.get(id),
-    answer: (id) => answers.get(id),
+    answer: (id) => answers.get(id)?.text,
     create: Effect.fn("ManagedExecutionProvider.create")(
       function* (receipt, beforeProviderStart, recordMappings) {
         if (!supports(receipt.intent.configuration.provider))
@@ -352,14 +353,35 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                                   operation: "ownedTransportMissing",
                                 });
                               lifecycle = owned;
+                              // Every request Codex sends ends the run, including methods no
+                              // handler covers and payloads that fail to decode.
+                              for (const method of Object.keys(SERVER_REQUEST_PARAMS))
+                                yield* owned.client.handleServerRequest(
+                                  method as keyof typeof SERVER_REQUEST_PARAMS,
+                                  () => refuse(method),
+                                );
+                              yield* owned.client.handleUnknownServerRequest(refuse);
+                              yield* owned.client.raw.requests.pipe(
+                                Stream.runForEach((incoming) =>
+                                  refuse(incoming.method).pipe(Effect.ignore),
+                                ),
+                                Effect.forkIn(ownedScope),
+                              );
                               const model = bound.configuration.modelID;
                               const profileCheck = (method: string, check: () => void) =>
                                 Effect.try({
                                   try: check,
                                   catch: () => refusedCodexRequest(method),
                                 });
-                              // The effective configuration and MCP inventory, read just before
-                              // the turn, must still be the managed profile.
+                              // The effective configuration and MCP inventory must be the managed
+                              // profile before the thread starts, since Codex starts configured MCP
+                              // servers with the thread, and again just before the turn.
+                              const notRefused = (method: string) =>
+                                Deferred.isDone(refused).pipe(
+                                  Effect.flatMap((done) =>
+                                    done ? Effect.fail(refusedCodexRequest(method)) : Effect.void,
+                                  ),
+                                );
                               const effectiveProfile = owned.client.raw
                                 .request("config/read", { cwd: root, includeLayers: false })
                                 .pipe(
@@ -385,25 +407,27 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                                 );
                               const request: typeof owned.client.request = (method, payload) => {
                                 if (method === "thread/start")
-                                  return owned.client
-                                    .request(method, {
-                                      ...(payload as object),
-                                      developerInstructions:
-                                        codexRestrictions.developerInstructions,
-                                    } as typeof payload)
-                                    .pipe(
-                                      Effect.tap((response) =>
-                                        Effect.tryPromise({
-                                          try: () =>
-                                            checkManagedCodexThread(
-                                              response,
-                                              model,
-                                              codexRestrictions,
-                                            ),
-                                          catch: () => refusedCodexRequest(method),
-                                        }),
-                                      ),
-                                    );
+                                  return effectiveProfile.pipe(
+                                    Effect.andThen(notRefused(method)),
+                                    Effect.andThen(
+                                      owned.client.request(method, {
+                                        ...(payload as object),
+                                        developerInstructions:
+                                          codexRestrictions.developerInstructions,
+                                      } as typeof payload),
+                                    ),
+                                    Effect.tap((response) =>
+                                      Effect.tryPromise({
+                                        try: () =>
+                                          checkManagedCodexThread(
+                                            response,
+                                            model,
+                                            codexRestrictions,
+                                          ),
+                                        catch: () => refusedCodexRequest(method),
+                                      }),
+                                    ),
+                                  );
                                 if (method === "turn/start")
                                   return effectiveProfile.pipe(
                                     Effect.andThen(
@@ -418,6 +442,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                                         ),
                                       ),
                                     ),
+                                    Effect.andThen(notRefused(method)),
                                     Effect.andThen(owned.client.request(method, payload)),
                                   );
                                 return MANAGED_CODEX_REQUESTS.has(method)
@@ -639,7 +664,13 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                   event.message.runId === intent.canonicalRunID
                 ) {
                   assistantMessages.set(event.message.id, event.message.text);
-                  answers.set(intent.commandID, [...assistantMessages.values()].join("\n\n"));
+                  answers.set(
+                    intent.commandID,
+                    Receipts.boundedAnswer({
+                      text: [...assistantMessages.values()].join("\n\n"),
+                      truncated: false,
+                    }),
+                  );
                 }
                 if (event.type === "provider_turn.updated") {
                   const turn = event.providerTurn;
@@ -786,10 +817,10 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                   ? {
                       finish: {
                         outcome,
-                        answer: Receipts.boundedAnswer({
-                          text: answers.get(intent.commandID) ?? "",
+                        answer: answers.get(intent.commandID) ?? {
+                          text: "",
                           truncated: false,
-                        }),
+                        },
                       },
                     }
                   : {}),

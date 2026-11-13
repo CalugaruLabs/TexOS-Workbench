@@ -168,7 +168,31 @@ function managedConfiguration(model: string) {
   };
 }
 
-type CodexFault = "configuration" | "approvalRequest";
+type CodexFault = "configuration" | "approvalRequest" | "toolCall" | "unknownRequest";
+
+// Requests Codex might send mid-turn; a managed run answers each with a refusal and ends.
+const codexRequests = {
+  approvalRequest: {
+    method: "item/fileChange/requestApproval",
+    params: {
+      threadId: "controlled-native-thread",
+      turnId: "controlled-native-turn",
+      itemId: "synthetic-patch",
+      reason: "Synthetic write outside the folder",
+    },
+  },
+  toolCall: {
+    method: "item/tool/call",
+    params: {
+      threadId: "controlled-native-thread",
+      turnId: "controlled-native-turn",
+      callId: "synthetic-call",
+      tool: "synthetic_tool",
+      arguments: {},
+    },
+  },
+  unknownRequest: { method: "synthetic/unknownRequest", params: {} },
+} as const;
 
 function codexTranscript(
   intent: ExecutionIntent,
@@ -210,101 +234,117 @@ function codexTranscript(
         },
       },
       { type: "expect_outbound", frame: { method: "initialized" } },
-      {
-        type: "expect_outbound",
-        frame: {
-          id: 2,
-          method: "thread/start",
-          params: {
-            cwd: intent.worktree.root,
-            model: intent.configuration.modelID,
-            config: CodexAdapter.CODEX_THREAD_CONFIG,
-            developerInstructions: syntheticCodexRestrictions.developerInstructions,
-          },
-        },
-      },
-      {
-        type: "emit_inbound",
-        frame: {
-          id: 2,
-          result: {
-            thread: {
-              id: "controlled-native-thread",
-              sessionId: "controlled-native-thread",
-              forkedFromId: null,
-              preview: "",
-              ephemeral: false,
-              modelProvider: "openai",
-              createdAt: 1782622440,
-              updatedAt: 1782622440,
-              status: { type: "idle" },
-              path: NodePath.join(intent.worktree.root, "fixture-thread.jsonl"),
-              cwd: intent.worktree.root,
-              cliVersion: "0.144.0",
-              source: "vscode",
-              threadSource: null,
-              agentNickname: null,
-              agentRole: null,
-              gitInfo: null,
-              name: null,
-              turns: [],
-            },
-            model: intent.configuration.modelID,
-            modelProvider: "openai",
-            serviceTier: null,
-            cwd: intent.worktree.root,
-            instructionSources: [],
-            approvalPolicy: "never",
-            approvalsReviewer: "user",
-            sandbox: {
-              type: "workspaceWrite",
-              writableRoots: [intent.worktree.root],
-              networkAccess: false,
-            },
-            reasoningEffort: "medium",
-          },
-        },
-      },
-      {
-        type: "expect_outbound",
-        frame: {
-          id: 3,
-          method: "config/read",
-          params: { cwd: intent.worktree.root, includeLayers: false },
-        },
-      },
-      {
-        type: "emit_inbound",
-        frame: {
-          id: 3,
-          result: {
-            config: {
-              ...managedConfiguration(intent.configuration.modelID),
-              ...(fault === "configuration"
-                ? {
-                    features: {
-                      ...managedConfiguration(intent.configuration.modelID).features,
-                      shell_tool: true,
-                    },
-                  }
-                : {}),
-            },
-            origins: {},
-          },
-        },
-      },
+      ...managedProfileCheck(intent, 2, fault),
       ...(fault === "configuration"
         ? []
         : ([
             {
               type: "expect_outbound",
-              frame: { id: 4, method: "mcpServerStatus/list", params: { limit: 256 } },
+              frame: {
+                id: 4,
+                method: "thread/start",
+                params: {
+                  cwd: intent.worktree.root,
+                  model: intent.configuration.modelID,
+                  config: CodexAdapter.CODEX_THREAD_CONFIG,
+                  developerInstructions: syntheticCodexRestrictions.developerInstructions,
+                },
+              },
             },
-            { type: "emit_inbound", frame: { id: 4, result: { data: [], nextCursor: null } } },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 4,
+                result: {
+                  thread: {
+                    id: "controlled-native-thread",
+                    sessionId: "controlled-native-thread",
+                    forkedFromId: null,
+                    preview: "",
+                    ephemeral: false,
+                    modelProvider: "openai",
+                    createdAt: 1782622440,
+                    updatedAt: 1782622440,
+                    status: { type: "idle" },
+                    path: NodePath.join(intent.worktree.root, "fixture-thread.jsonl"),
+                    cwd: intent.worktree.root,
+                    cliVersion: "0.144.0",
+                    source: "vscode",
+                    threadSource: null,
+                    agentNickname: null,
+                    agentRole: null,
+                    gitInfo: null,
+                    name: null,
+                    turns: [],
+                  },
+                  model: intent.configuration.modelID,
+                  modelProvider: "openai",
+                  serviceTier: null,
+                  cwd: intent.worktree.root,
+                  instructionSources: [],
+                  approvalPolicy: "never",
+                  approvalsReviewer: "user",
+                  sandbox: {
+                    type: "workspaceWrite",
+                    writableRoots: [intent.worktree.root],
+                    networkAccess: false,
+                  },
+                  reasoningEffort: "medium",
+                },
+              },
+            },
+            ...managedProfileCheck(intent, 5),
             ...codexTurn(intent, fault),
           ] as const)),
     ],
   };
+}
+
+/** The effective-configuration and MCP check, before the thread and again before the turn. */
+function managedProfileCheck(
+  intent: ExecutionIntent,
+  id: number,
+  fault?: CodexFault,
+): CodexReplay.CodexAppServerReplayTranscript["entries"] {
+  return [
+    {
+      type: "expect_outbound",
+      frame: {
+        id,
+        method: "config/read",
+        params: { cwd: intent.worktree.root, includeLayers: false },
+      },
+    },
+    {
+      type: "emit_inbound",
+      frame: {
+        id,
+        result: {
+          config: {
+            ...managedConfiguration(intent.configuration.modelID),
+            ...(fault === "configuration"
+              ? {
+                  features: {
+                    ...managedConfiguration(intent.configuration.modelID).features,
+                    shell_tool: true,
+                  },
+                }
+              : {}),
+          },
+          origins: {},
+        },
+      },
+    },
+    ...(fault === "configuration"
+      ? []
+      : ([
+          {
+            type: "expect_outbound",
+            frame: { id: id + 1, method: "mcpServerStatus/list", params: { limit: 256 } },
+          },
+          { type: "emit_inbound", frame: { id: id + 1, result: { data: [], nextCursor: null } } },
+        ] as const)),
+  ];
 }
 
 function codexTurn(
@@ -326,7 +366,7 @@ function codexTurn(
     {
       type: "expect_outbound",
       frame: {
-        id: 5,
+        id: 7,
         method: "turn/start",
         params: {
           threadId: "controlled-native-thread",
@@ -350,23 +390,11 @@ function codexTurn(
         },
       },
     },
-    { type: "emit_inbound", frame: { id: 5, result: { turn: turn("inProgress") } } },
-    ...(fault === "approvalRequest"
+    { type: "emit_inbound", frame: { id: 7, result: { turn: turn("inProgress") } } },
+    ...(fault !== undefined && fault !== "configuration"
       ? ([
           { type: "emit_inbound", frame: { method: "turn/started", params: started } },
-          {
-            type: "emit_inbound",
-            frame: {
-              id: 77,
-              method: "item/fileChange/requestApproval",
-              params: {
-                threadId: "controlled-native-thread",
-                turnId: "controlled-native-turn",
-                itemId: "synthetic-patch",
-                reason: "Synthetic write outside the folder",
-              },
-            },
-          },
+          { type: "emit_inbound", frame: { id: 77, ...codexRequests[fault] } },
           {
             type: "expect_outbound",
             frame: { id: 77, error: { code: -32001, message: "Refused by native execution" } },
@@ -553,7 +581,9 @@ const setup = Effect.fn("ManagedExecutionTest.setup")(function* (
           });
           const transcript = codexTranscript(
             intent,
-            fault === "configuration" || fault === "approvalRequest" ? fault : undefined,
+            fault === "configuration" || (fault !== undefined && fault in codexRequests)
+              ? (fault as CodexFault)
+              : undefined,
           );
           const driver = yield* CodexReplay.makeReplayDriver(transcript, {
             beforeEmitInbound: (entry) =>
@@ -758,7 +788,7 @@ describe("control through private binding and actual managed lower adapters", ()
         assert.notEqual(f.managed.observation(f.intent.commandID)?.outcome, "completed");
       }).pipe(Effect.scoped, Effect.provide(layers)),
   );
-  it.effect.each(["configuration", "approvalRequest"] as const)(
+  it.effect.each(["configuration", "approvalRequest", "toolCall", "unknownRequest"] as const)(
     "a managed Codex run refused for %s never settles and leaves the file alone",
     (fault) =>
       Effect.gen(function* () {
@@ -775,7 +805,8 @@ describe("control through private binding and actual managed lower adapters", ()
         assert.equal(saved?.phase, "uncertain");
         assert.isUndefined(saved?.finish);
         assert.notEqual(f.managed.observation(f.intent.commandID)?.outcome, "completed");
-        if (fault === "configuration") assert.isUndefined(saved?.mappings.providerTurnID);
+        // A configuration that isn't the managed profile is refused before the thread starts.
+        if (fault === "configuration") assert.deepEqual(saved?.mappings, {});
       }).pipe(Effect.scoped, Effect.provide(layers)),
   );
 

@@ -1,7 +1,8 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
-// SQLite cannot widen a CHECK constraint in place, so the receipts table is rebuilt.
+// SQLite cannot widen a CHECK constraint in place, so the receipts table is rebuilt. Rows from
+// before this migration get the generation 'pre-071', so TexOS can reconcile an uncertain one.
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`
@@ -27,9 +28,10 @@ export default Effect.gen(function* () {
   yield* sql`
     INSERT INTO native_execution_receipts_v2
       (command_id, canonical_run_id, authority_id, envelope_digest, envelope_json, runtime_id,
-       child_id, t3_thread_id, t3_provider_session_id, phase, mappings_json, drained)
+       child_id, t3_thread_id, t3_provider_session_id, phase, mappings_json, drained,
+       host_generation)
     SELECT command_id, canonical_run_id, authority_id, envelope_digest, envelope_json, runtime_id,
-       child_id, t3_thread_id, t3_provider_session_id, phase, mappings_json, drained
+       child_id, t3_thread_id, t3_provider_session_id, phase, mappings_json, drained, 'pre-071'
     FROM native_execution_receipts
   `;
   yield* sql`DROP TABLE native_execution_receipts`;

@@ -49,6 +49,31 @@ export const MANAGED_CODEX_DISABLED_FEATURES = [
   "token_budget",
   "current_time_reminder",
   "rollout_budget",
+  // On by default in Codex 0.167.0 and missing from config/read unless set, so only this list
+  // turns them off: each adds a tool, a background process, model usage, plugins or MCP, or an
+  // outside connection.
+  "api_key_cyber_access_programs",
+  "api_key_model_discovery",
+  "bedrock_setup_wizard",
+  "browser_annotation_api",
+  "cli_daybreak",
+  "daemon_auto_start",
+  "fast_mode",
+  "ultrafast_mode",
+  "guardian_approval",
+  "in_app_chat",
+  "in_app_dictation",
+  "in_app_local_automation",
+  "in_app_updates",
+  "in_app_voice",
+  "mcp_oauth_refresh_coordination",
+  "plugin_discovery_prefetch",
+  "plugin_sharing",
+  "sleep_tool",
+  "tool_call_mcp_elicitation",
+  "unified_exec_tty",
+  "view_image",
+  "write_stdin_approval",
 ] as const;
 
 type Setting = string | number | boolean | readonly [] | Readonly<Record<string, never>>;
@@ -65,6 +90,9 @@ const managedSettings = (
   ["approval_policy", "never"],
   ["sandbox_mode", "workspace-write"],
   ["sandbox_workspace_write.network_access", false],
+  // Workspace-write also opens /tmp and $TMPDIR, which other apps share.
+  ["sandbox_workspace_write.exclude_slash_tmp", true],
+  ["sandbox_workspace_write.exclude_tmpdir_env_var", true],
   ["web_search", "disabled"],
   ["project_doc_max_bytes", 0],
   ["project_doc_fallback_filenames", []],
@@ -76,6 +104,7 @@ const managedSettings = (
   ["tools.experimental_request_user_input.enabled", false],
   ["include_permissions_instructions", false],
   ["include_collaboration_mode_instructions", false],
+  ["include_apps_instructions", false],
   ["include_environment_context", false],
   ["skills.include_instructions", false],
   ["skills.bundled.enabled", false],
@@ -85,15 +114,18 @@ const managedSettings = (
 
 /** Settings that add instructions, endpoints, tools or automation; none may be set. */
 const UNSET_SETTINGS = [
+  "allow_symlinked_codex_home",
+  "approvals_reviewer",
   "apps",
   "apps_mcp_product_sku",
   "audio",
   "auto_review",
   "base_url",
   "browser_use",
-  "chatgpt_base_url",
+  "cloud",
   "compact_prompt",
   "computer_use",
+  "daybreak",
   "debug",
   "default_permissions",
   "desktop",
@@ -111,14 +143,13 @@ const UNSET_SETTINGS = [
   "experimental_use_unified_exec_tool",
   "ghost_snapshot",
   "hooks",
-  "include_apps_instructions",
   "instructions",
   "js_repl_node_module_dirs",
   "js_repl_node_path",
   "log_dir",
+  "mcp_enterprise_managed_auth",
   "mcp_oauth_callback_port",
   "mcp_oauth_callback_url",
-  "mcp_oauth_credentials_store",
   "memories",
   "model_catalog_json",
   "model_instructions_file",
@@ -127,12 +158,9 @@ const UNSET_SETTINGS = [
   "oss_provider",
   "otel",
   "permissions",
-  "plugins",
   "profile",
-  "profiles",
-  "project_root_markers",
   "realtime",
-  "shell_environment_policy",
+  "responses_api_metadata",
   "sqlite_home",
   "tool_suggest",
   "tui",
@@ -185,6 +213,35 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
     ? (value as Record<string, unknown>)
     : undefined;
 
+const emptyTable = (value: unknown) => {
+  const table = record(value);
+  return table !== undefined && Object.keys(table).length === 0;
+};
+
+/** Settings Codex 0.167 reports with its own default; each may hold only that default. */
+const DEFAULT_ONLY_SETTINGS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
+  ["chatgpt_base_url", (value) => value === "https://chatgpt.com/backend-api/"],
+  ["mcp_oauth_credentials_store", (value) => value === "auto"],
+  [
+    "project_root_markers",
+    (value) => Array.isArray(value) && value.length === 1 && value[0] === ".git",
+  ],
+  [
+    "shell_environment_policy",
+    (value) => {
+      const policy = record(value);
+      return policy !== undefined && Object.values(policy).every((entry) => entry === null);
+    },
+  ],
+  // `--config table={}` merges into a table rather than replacing it, so these must be empty.
+  ["plugins", emptyTable],
+  ["profiles", emptyTable],
+  ["marketplaces", emptyTable],
+];
+
+/** Codex 0.167 accepts these under --strict-config but no longer reports them. */
+const UNREPORTED_SETTINGS = new Set(["tools.experimental_request_user_input.enabled"]);
+
 const at = (config: Record<string, unknown>, dotted: string): unknown =>
   dotted.split(".").reduce<unknown>((value, key) => record(value)?.[key], config);
 
@@ -209,6 +266,7 @@ export function checkManagedCodexConfiguration(
   if (!config) throw new ManagedCodexProfileError("configurationUnreadable");
   for (const [key, expected] of managedSettings(model, restrictions.chatgptWorkspaceID)) {
     const actual = at(config, key);
+    if (actual === undefined && UNREPORTED_SETTINGS.has(key)) continue;
     const matches =
       key === "forced_chatgpt_workspace_id" && Array.isArray(actual)
         ? actual.length === 1 && actual[0] === expected
@@ -225,6 +283,11 @@ export function checkManagedCodexConfiguration(
   for (const key of UNSET_SETTINGS)
     if (config[key] !== undefined && config[key] !== null)
       throw new ManagedCodexProfileError(`setting:${key}`);
+  for (const [key, isDefault] of DEFAULT_ONLY_SETTINGS) {
+    const actual = config[key];
+    if (actual !== undefined && actual !== null && !isDefault(actual))
+      throw new ManagedCodexProfileError(`setting:${key}`);
+  }
   const providers = config.model_providers;
   if (providers !== undefined && providers !== null && !settingMatches(providers, {}))
     throw new ManagedCodexProfileError("setting:model_providers");

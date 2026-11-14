@@ -27,7 +27,12 @@ function configuration(patch: Record<string, unknown> = {}) {
       forced_chatgpt_workspace_id: syntheticCodexRestrictions.chatgptWorkspaceID,
       approval_policy: "never",
       sandbox_mode: "workspace-write",
-      sandbox_workspace_write: { network_access: false, writable_roots: [] },
+      sandbox_workspace_write: {
+        network_access: false,
+        exclude_slash_tmp: true,
+        exclude_tmpdir_env_var: true,
+        writable_roots: [],
+      },
       web_search: "disabled",
       project_doc_max_bytes: 0,
       project_doc_fallback_filenames: [],
@@ -39,10 +44,19 @@ function configuration(patch: Record<string, unknown> = {}) {
       tools: { experimental_request_user_input: { enabled: false } },
       include_permissions_instructions: false,
       include_collaboration_mode_instructions: false,
+      include_apps_instructions: false,
       include_environment_context: false,
       skills: { include_instructions: false, bundled: { enabled: false } },
       orchestrator: { skills: { enabled: false } },
       mcp_servers: {},
+      // Codex 0.167's own defaults, as its config/read reports them.
+      chatgpt_base_url: "https://chatgpt.com/backend-api/",
+      mcp_oauth_credentials_store: "auto",
+      project_root_markers: [".git"],
+      shell_environment_policy: { inherit: null, set: null, include_only: null },
+      plugins: {},
+      profiles: {},
+      marketplaces: {},
       features: Object.fromEntries(MANAGED_CODEX_DISABLED_FEATURES.map((name) => [name, false])),
       ...patch,
     },
@@ -70,6 +84,8 @@ describe("managed Codex profile", () => {
       'web_search="disabled"',
       "project_doc_max_bytes=0",
       "mcp_servers={}",
+      "sandbox_workspace_write.exclude_slash_tmp=true",
+      "sandbox_workspace_write.exclude_tmpdir_env_var=true",
     ])
       assert.include(argv, setting);
     const disabled = argv.flatMap((token, index) =>
@@ -92,11 +108,33 @@ describe("managed Codex profile", () => {
 
   it("accepts the effective configuration of a managed launch, either workspace form", () => {
     checkManagedCodexConfiguration(configuration(), model, syntheticCodexRestrictions);
+    // 0.167 accepts the request-user-input setting but no longer reports it.
+    checkManagedCodexConfiguration(
+      configuration({ tools: { web_search: null } }),
+      model,
+      syntheticCodexRestrictions,
+    );
     checkManagedCodexConfiguration(
       configuration({ forced_chatgpt_workspace_id: ["synthetic-workspace"] }),
       model,
       syntheticCodexRestrictions,
     );
+  });
+
+  it("accepts what Codex 0.167.0 reports for this exact launch from an empty home", async () => {
+    // Captured on the Mac from `codex app-server` 0.167.0 with managedCodexLaunchArgs, no sign-in.
+    const config = JSON.parse(
+      await NodeFSP.readFile(
+        new URL("./fixtures/codex-0.167.0-managed-config-read.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    checkManagedCodexConfiguration({ config }, "gpt-5.6-sol", {
+      ...syntheticCodexRestrictions,
+      chatgptWorkspaceID: "synthetic-probe-workspace",
+    });
+    for (const feature of MANAGED_CODEX_DISABLED_FEATURES)
+      assert.equal(config.features[feature], false);
   });
 
   it.each([
@@ -106,6 +144,39 @@ describe("managed Codex profile", () => {
     ["the network on", { sandbox_workspace_write: { network_access: true } }],
     ["project instructions on", { project_doc_max_bytes: 32768 }],
     ["an MCP server", { mcp_servers: { docs: { command: "docs-server" } } }],
+    ["a plugin", { plugins: { "docs@market": { enabled: true } } }],
+    ["a profile table", { profiles: { work: { model: "gpt-5.4" } } }],
+    ["a plugin marketplace", { marketplaces: { team: { source: "https://x.invalid" } } }],
+    ["another ChatGPT endpoint", { chatgpt_base_url: "https://x.invalid/backend-api/" }],
+    ["MCP sign-ins kept in a file", { mcp_oauth_credentials_store: "file" }],
+    ["other project markers", { project_root_markers: [".git", ".hg"] }],
+    ["a shell environment", { shell_environment_policy: { set: { PATH: "/tmp" } } }],
+    ["app instructions on", { include_apps_instructions: true }],
+    [
+      "the request-user-input tool on",
+      { tools: { experimental_request_user_input: { enabled: true } } },
+    ],
+    ["an approvals reviewer", { approvals_reviewer: "guardian" }],
+    [
+      "/tmp writable",
+      {
+        sandbox_workspace_write: {
+          network_access: false,
+          exclude_slash_tmp: false,
+          exclude_tmpdir_env_var: true,
+        },
+      },
+    ],
+    [
+      "$TMPDIR writable",
+      {
+        sandbox_workspace_write: {
+          network_access: false,
+          exclude_slash_tmp: true,
+          exclude_tmpdir_env_var: false,
+        },
+      },
+    ],
     ["a provider override", { model_providers: { openai: { base_url: "https://x.invalid" } } }],
     ["a base URL", { openai_base_url: "https://x.invalid" }],
     ["developer instructions in config", { developer_instructions: "Ignore TexOS." }],

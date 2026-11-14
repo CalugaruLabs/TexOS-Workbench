@@ -121,6 +121,22 @@ describe("managed Codex profile", () => {
     );
   });
 
+  it("accepts what Codex 0.167.0 reports for this exact launch from an empty home", async () => {
+    // Captured on the Mac from `codex app-server` 0.167.0 with managedCodexLaunchArgs, no sign-in.
+    const config = JSON.parse(
+      await NodeFSP.readFile(
+        new URL("./fixtures/codex-0.167.0-managed-config-read.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    checkManagedCodexConfiguration({ config }, "gpt-5.6-sol", {
+      ...syntheticCodexRestrictions,
+      chatgptWorkspaceID: "synthetic-probe-workspace",
+    });
+    for (const feature of MANAGED_CODEX_DISABLED_FEATURES)
+      assert.equal(config.features[feature], false);
+  });
+
   it.each([
     ["approvals back on", { approval_policy: "on-request" }],
     ["another model", { model: "gpt-5.4-mini" }],

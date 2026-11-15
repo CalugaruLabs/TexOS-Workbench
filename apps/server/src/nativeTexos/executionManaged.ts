@@ -255,7 +255,8 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
               const bound = yield* bindings.resolve(receipt);
               publish({});
               const ownedScope = yield* Scope.make();
-              // A request from Codex means it wants something a managed run never grants.
+              // A request from Codex, or remote control turning on, means it wants something a
+              // managed run never grants.
               const refused = yield* Deferred.make<void>();
               const refuse = (method: string) =>
                 Deferred.succeed(refused, undefined).pipe(
@@ -367,6 +368,20 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                                 ),
                                 Effect.forkIn(ownedScope),
                               );
+                              // Codex 0.167 ignores `--disable remote_control`, which lets another
+                              // device drive this Codex. Codex reports the status before it answers
+                              // config/read, so a run starts only once it says disabled.
+                              let remoteControl: string | undefined;
+                              yield* owned.client.handleServerNotification(
+                                "remoteControl/status/changed",
+                                (payload) =>
+                                  Effect.suspend(() => {
+                                    remoteControl = payload.status;
+                                    return payload.status === "disabled"
+                                      ? Effect.void
+                                      : refuse("remoteControl/status/changed").pipe(Effect.ignore);
+                                  }),
+                              );
                               const model = bound.configuration.modelID;
                               const profileCheck = (method: string, check: () => void) =>
                                 Effect.try({
@@ -403,6 +418,12 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                                     profileCheck("mcpServerStatus/list", () =>
                                       checkManagedCodexMcpInventory(inventory),
                                     ),
+                                  ),
+                                  Effect.andThen(
+                                    profileCheck("remoteControl/status/changed", () => {
+                                      if (remoteControl !== "disabled")
+                                        throw new Error("remoteControlNotDisabled");
+                                    }),
                                   ),
                                 );
                               const request: typeof owned.client.request = (method, payload) => {

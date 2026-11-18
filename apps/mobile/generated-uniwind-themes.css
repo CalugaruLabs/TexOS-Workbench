@@ -533,8 +533,8 @@
       --color-switch-active-thumb: #121212;
       --color-switch-inactive-track: #3a3a3a;
       --color-switch-inactive-thumb: #a3a3a3;
-      --color-warning: #3d2e14;
-      --color-warning-border: rgba(242, 179, 71, 0.32);
+      --color-warning: #3d3208;
+      --color-warning-border: rgba(254, 204, 2, 0.32);
       --color-warning-foreground: #f6cf86;
       --color-danger: #3b1f1b;
       --color-danger-border: rgba(239, 91, 76, 0.32);

@@ -909,7 +909,8 @@ export const IRIS_THEME: ThemeDefinition = {
 };
 
 /** Graphite (TexOS, 2026-11-09): neutral greys, blue for focus and links, a white main action,
- * amber only for warnings and live work. The light variant predates it and is unused in TexOS. */
+ * amber only for warnings and live work. Amber is the brand's Golden Yellow #fecc02 (2026-11-17).
+ * The light variant predates it and is unused in TexOS. */
 export const TEXOS_THEME: ThemeDefinition = {
   id: "texos",
   label: "TexOS",
@@ -943,9 +944,9 @@ export const TEXOS_THEME: ThemeDefinition = {
     error: "oklch(0.662635 0.185366 28.800281)",
     errorForeground: "oklch(0.744748 0.131376 27.988544)",
     errorSurface: "oklch(0.275902 0.044594 28.920657)",
-    warning: "#f2b347",
+    warning: "#fecc02",
     warningForeground: "oklch(0.872115 0.101263 82.378629)",
-    warningSurface: "#3d2e14",
+    warningSurface: "#3d3208",
     update: "#5aa5ff",
     updateForeground: "#5aa5ff",
     updateSurface: "#16263a",
@@ -960,7 +961,7 @@ export const TEXOS_THEME: ThemeDefinition = {
     codeForeground: "#ededed",
     searchMatchBackground: "oklch(0.456411 0.074954 83.503228)",
     searchMatchForeground: "oklch(0.971074 0.007378 80.721081)",
-    searchMatchActiveBackground: "#f2b347",
+    searchMatchActiveBackground: "#fecc02",
     searchMatchActiveForeground: "oklch(0.212023 0.037903 83.709002)",
     sidebar: "#303030",
     sidebarForeground: "#ededed",

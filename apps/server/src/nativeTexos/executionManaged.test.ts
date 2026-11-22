@@ -173,12 +173,36 @@ function managedConfiguration(model: string) {
   };
 }
 
-type CodexFault =
-  | "configuration"
-  | "approvalRequest"
-  | "toolCall"
-  | "unknownRequest"
-  | "undecodableRequest";
+type CodexRequestFault = keyof typeof codexRequests;
+// Remote control: on as Codex starts, never reported, or turned on mid-turn.
+const CODEX_FAULTS = [
+  "configuration",
+  "remoteControlOn",
+  "remoteControlMissing",
+  "remoteControlChanged",
+  "approvalRequest",
+  "toolCall",
+  "unknownRequest",
+  "undecodableRequest",
+] as const;
+type CodexFault = (typeof CODEX_FAULTS)[number];
+const isCodexFault = (fault: string | undefined): fault is CodexFault =>
+  CODEX_FAULTS.some((known) => known === fault);
+const isRequestFault = (fault: CodexFault | undefined): fault is CodexRequestFault =>
+  fault !== undefined && fault in codexRequests;
+// These are refused before the thread starts, so the transcript ends after the profile check.
+const refusedBeforeThread = (fault: CodexFault | undefined) =>
+  fault === "configuration" || fault === "remoteControlOn" || fault === "remoteControlMissing";
+
+const remoteControlStatus = (status: "disabled" | "connecting") => ({
+  method: "remoteControl/status/changed",
+  params: {
+    status,
+    serverName: "fixture-remote",
+    installationId: "fixture-installation",
+    environmentId: null,
+  },
+});
 
 // Requests Codex might send mid-turn; a managed run answers each with a refusal and ends.
 const codexRequests = {
@@ -269,8 +293,16 @@ function codexTranscript(
         },
       },
       { type: "expect_outbound", frame: { method: "initialized" } },
+      ...(fault === "remoteControlMissing"
+        ? []
+        : ([
+            {
+              type: "emit_inbound",
+              frame: remoteControlStatus(fault === "remoteControlOn" ? "connecting" : "disabled"),
+            },
+          ] as const)),
       ...managedProfileCheck(intent, 2, fault),
-      ...(fault === "configuration"
+      ...(refusedBeforeThread(fault)
         ? []
         : ([
             {
@@ -426,39 +458,44 @@ function codexTurn(
       },
     },
     { type: "emit_inbound", frame: { id: 7, result: { turn: turn("inProgress") } } },
-    ...(fault !== undefined && fault !== "configuration"
+    ...(fault === "remoteControlChanged"
       ? ([
           { type: "emit_inbound", frame: { method: "turn/started", params: started } },
-          { type: "emit_inbound", frame: { id: 77, ...codexRequests[fault] } },
-          { type: "expect_outbound", frame: { id: 77, error: codexRefusals[fault] } },
+          { type: "emit_inbound", frame: remoteControlStatus("connecting") },
         ] as const)
-      : ([
-          {
-            type: "emit_inbound",
-            label: "edit",
-            frame: { method: "turn/started", params: started },
-          },
-          {
-            type: "emit_inbound",
-            frame: {
-              method: "item/completed",
-              params: {
-                threadId: "controlled-native-thread",
-                turnId: "controlled-native-turn",
-                completedAtMs: 2,
-                item: { type: "agentMessage", id: "answer-item", text: CODEX_ANSWER },
+      : isRequestFault(fault)
+        ? ([
+            { type: "emit_inbound", frame: { method: "turn/started", params: started } },
+            { type: "emit_inbound", frame: { id: 77, ...codexRequests[fault] } },
+            { type: "expect_outbound", frame: { id: 77, error: codexRefusals[fault] } },
+          ] as const)
+        : ([
+            {
+              type: "emit_inbound",
+              label: "edit",
+              frame: { method: "turn/started", params: started },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "item/completed",
+                params: {
+                  threadId: "controlled-native-thread",
+                  turnId: "controlled-native-turn",
+                  completedAtMs: 2,
+                  item: { type: "agentMessage", id: "answer-item", text: CODEX_ANSWER },
+                },
               },
             },
-          },
-          {
-            type: "emit_inbound",
-            frame: {
-              method: "turn/completed",
-              params: { threadId: "controlled-native-thread", turn: turn("completed") },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "turn/completed",
+                params: { threadId: "controlled-native-thread", turn: turn("completed") },
+              },
             },
-          },
-          { type: "runtime_exit", status: "success" },
-        ] as const)),
+            { type: "runtime_exit", status: "success" },
+          ] as const)),
   ];
 }
 
@@ -611,12 +648,7 @@ const setup = Effect.fn("ManagedExecutionTest.setup")(function* (
             HOME: homeDirectory,
             CODEX_HOME: profileDirectory,
           });
-          const transcript = codexTranscript(
-            intent,
-            fault === "configuration" || (fault !== undefined && fault in codexRequests)
-              ? (fault as CodexFault)
-              : undefined,
-          );
+          const transcript = codexTranscript(intent, isCodexFault(fault) ? fault : undefined);
           const driver = yield* CodexReplay.makeReplayDriver(transcript, {
             beforeEmitInbound: (entry) =>
               entry.label === "edit" ? edit().pipe(Effect.orDie) : Effect.void,
@@ -820,13 +852,7 @@ describe("control through private binding and actual managed lower adapters", ()
         assert.notEqual(f.managed.observation(f.intent.commandID)?.outcome, "completed");
       }).pipe(Effect.scoped, Effect.provide(layers)),
   );
-  it.effect.each([
-    "configuration",
-    "approvalRequest",
-    "toolCall",
-    "unknownRequest",
-    "undecodableRequest",
-  ] as const)(
+  it.effect.each(CODEX_FAULTS)(
     "a managed Codex run refused for %s never settles and leaves the file alone",
     (fault) =>
       Effect.gen(function* () {
@@ -843,8 +869,9 @@ describe("control through private binding and actual managed lower adapters", ()
         assert.equal(saved?.phase, "uncertain");
         assert.isUndefined(saved?.finish);
         assert.notEqual(f.managed.observation(f.intent.commandID)?.outcome, "completed");
-        // A configuration that isn't the managed profile is refused before the thread starts.
-        if (fault === "configuration") assert.deepEqual(saved?.mappings, {});
+        // A configuration that isn't the managed profile, or remote control that Codex hasn't
+        // reported disabled, is refused before the thread starts.
+        if (refusedBeforeThread(fault)) assert.deepEqual(saved?.mappings, {});
       }).pipe(Effect.scoped, Effect.provide(layers)),
   );
 

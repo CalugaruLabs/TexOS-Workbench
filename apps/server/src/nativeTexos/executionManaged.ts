@@ -48,6 +48,7 @@ import {
   checkManagedCodexThread,
   managedCodexLaunchArgs,
 } from "./executionCodexProfile.ts";
+import { stageManagedCodexModelCatalog } from "./executionCodexModelCatalog.ts";
 import { ExecutionControlError, type ControlledExecutionAttempt } from "./executionControl.ts";
 import * as Receipts from "./executionReceipts.ts";
 import type { ManagedExecutionObservation } from "./executionProtocol.ts";
@@ -311,6 +312,21 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                 `native_${NodeCrypto.createHash("sha256").update(bound.configuration.connectionID).digest("hex").slice(0, 56)}`,
               );
               const codexRestrictions = bound.codex;
+              // In the owned scope, so the catalog outlasts the Codex that reads it.
+              const codexModelCatalog =
+                intent.configuration.provider === "codex"
+                  ? yield* stageManagedCodexModelCatalog(
+                      config.stateDir,
+                      bound.configuration.modelID,
+                    ).pipe(
+                      Effect.provideService(Scope.Scope, ownedScope),
+                      Effect.provideService(FileSystem.FileSystem, fs),
+                      Effect.provideService(Path.Path, path),
+                      Effect.mapError(
+                        () => new ExecutionControlError({ code: "managedCodexProfileInvalid" }),
+                      ),
+                    )
+                  : "";
               const codexLaunchArgs =
                 intent.configuration.provider === "codex"
                   ? yield* Effect.try({
@@ -319,6 +335,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                         return managedCodexLaunchArgs(
                           bound.configuration.modelID,
                           codexRestrictions,
+                          codexModelCatalog,
                         );
                       },
                       catch: () =>
@@ -406,6 +423,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                                         config,
                                         model,
                                         codexRestrictions,
+                                        codexModelCatalog,
                                       ),
                                     ),
                                   ),

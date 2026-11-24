@@ -16,11 +16,13 @@ import {
 import { syntheticCodexRestrictions } from "./execution.testkit.ts";
 
 const model = "gpt-5.4";
+const catalog = "/synthetic/userdata/codex-model-catalog-Ab12/models.json";
 
 function configuration(patch: Record<string, unknown> = {}) {
   return {
     config: {
       model,
+      model_catalog_json: catalog,
       model_provider: "openai",
       forced_login_method: "chatgpt",
       cli_auth_credentials_store: "file",
@@ -74,10 +76,13 @@ const thread = (patch: Record<string, unknown> = {}) => ({
 
 describe("managed Codex profile", () => {
   it("launches with strict config, approvals off, no MCP servers and every listed feature off", () => {
-    const argv = tokenizeCliArgs(managedCodexLaunchArgs(model, syntheticCodexRestrictions));
+    const argv = tokenizeCliArgs(
+      managedCodexLaunchArgs(model, syntheticCodexRestrictions, catalog),
+    );
     assert.equal(argv[0], "--strict-config");
     for (const setting of [
       'model="gpt-5.4"',
+      `model_catalog_json="${catalog}"`,
       'approval_policy="never"',
       'forced_chatgpt_workspace_id="synthetic-workspace"',
       'cli_auth_credentials_store="file"',
@@ -96,28 +101,44 @@ describe("managed Codex profile", () => {
     assert.include(disabled, "unified_exec");
   });
 
-  it("refuses a model or workspace that could carry another setting into the launch", () => {
-    assert.throws(() => managedCodexLaunchArgs('gpt" --config x="y', syntheticCodexRestrictions));
+  it("refuses a model, workspace or catalog path that could carry another setting into the launch", () => {
     assert.throws(() =>
-      managedCodexLaunchArgs(model, {
-        ...syntheticCodexRestrictions,
-        chatgptWorkspaceID: "workspace' --enable 'shell_tool",
-      }),
+      managedCodexLaunchArgs('gpt" --config x="y', syntheticCodexRestrictions, catalog),
     );
+    assert.throws(() =>
+      managedCodexLaunchArgs(
+        model,
+        { ...syntheticCodexRestrictions, chatgptWorkspaceID: "workspace' --enable 'shell_tool" },
+        catalog,
+      ),
+    );
+    for (const path of [
+      "models.json",
+      '/state/models.json" --config x="y',
+      "/state/models.json' --enable 'shell_tool",
+      "/state/a\\models.json",
+      "/state/a\nmodels.json",
+    ])
+      assert.throws(
+        () => managedCodexLaunchArgs(model, syntheticCodexRestrictions, path),
+        "invalidProfileValue",
+      );
   });
 
   it("accepts the effective configuration of a managed launch, either workspace form", () => {
-    checkManagedCodexConfiguration(configuration(), model, syntheticCodexRestrictions);
+    checkManagedCodexConfiguration(configuration(), model, syntheticCodexRestrictions, catalog);
     // 0.167 accepts the request-user-input setting but no longer reports it.
     checkManagedCodexConfiguration(
       configuration({ tools: { web_search: null } }),
       model,
       syntheticCodexRestrictions,
+      catalog,
     );
     checkManagedCodexConfiguration(
       configuration({ forced_chatgpt_workspace_id: ["synthetic-workspace"] }),
       model,
       syntheticCodexRestrictions,
+      catalog,
     );
   });
 
@@ -129,10 +150,13 @@ describe("managed Codex profile", () => {
         "utf8",
       ),
     );
-    checkManagedCodexConfiguration({ config }, "gpt-5.6-sol", {
-      ...syntheticCodexRestrictions,
-      chatgptWorkspaceID: "synthetic-probe-workspace",
-    });
+    // That launch had no catalog yet; Runs now add one.
+    checkManagedCodexConfiguration(
+      { config: { ...config, model_catalog_json: catalog } },
+      "gpt-5.6-sol",
+      { ...syntheticCodexRestrictions, chatgptWorkspaceID: "synthetic-probe-workspace" },
+      catalog,
+    );
     for (const feature of MANAGED_CODEX_DISABLED_FEATURES)
       assert.equal(config.features[feature], false);
   });
@@ -140,6 +164,8 @@ describe("managed Codex profile", () => {
   it.each([
     ["approvals back on", { approval_policy: "on-request" }],
     ["another model", { model: "gpt-5.4-mini" }],
+    ["another model catalog", { model_catalog_json: "/elsewhere/models.json" }],
+    ["no model catalog", { model_catalog_json: null }],
     ["another workspace", { forced_chatgpt_workspace_id: ["synthetic-workspace", "other"] }],
     ["the network on", { sandbox_workspace_write: { network_access: true } }],
     ["project instructions on", { project_doc_max_bytes: 32768 }],
@@ -214,7 +240,12 @@ describe("managed Codex profile", () => {
     ],
   ])("refuses an effective configuration with %s", (_label, patch) => {
     assert.throws(() =>
-      checkManagedCodexConfiguration(configuration(patch), model, syntheticCodexRestrictions),
+      checkManagedCodexConfiguration(
+        configuration(patch),
+        model,
+        syntheticCodexRestrictions,
+        catalog,
+      ),
     );
   });
 

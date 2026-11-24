@@ -13,7 +13,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
-import { ManagedExecutionProvider } from "./executionManaged.ts";
+import { ManagedExecutionProvider, type ManagedUsageLimit } from "./executionManaged.ts";
 import * as Receipts from "./executionReceipts.ts";
 import {
   ControlledExecutionProvider,
@@ -108,6 +108,7 @@ describe("private admitted execution", () => {
             ),
           observation: () => undefined,
           answer: () => undefined,
+          usageLimit: () => undefined,
         });
         assert.equal(recoveries, 0);
         const control = yield* makeExecutionControl(syntheticBinding).pipe(
@@ -159,6 +160,7 @@ describe("private admitted execution", () => {
         create: () => Effect.fail(new ExecutionControlError({ code: "mustNotCreate" })),
         observation: () => undefined,
         answer: () => undefined,
+        usageLimit: () => undefined,
       });
       const native = authorizer(intent, yield* Clock.currentTimeMillis);
       const signIn = syntheticRequest("execution.panelSignIn", {}, 11);
@@ -508,6 +510,7 @@ describe("private admitted execution", () => {
           create: () => Effect.fail(new ExecutionControlError({ code: "mustNotCreate" })),
           observation: () => undefined,
           answer: (commandID) => (commandID === intent.commandID ? "Partial 😀 answer" : undefined),
+          usageLimit: () => undefined,
         });
         const control = yield* makeExecutionControl(syntheticBinding).pipe(
           Effect.provideService(ManagedExecutionProvider, managed),
@@ -558,6 +561,42 @@ describe("private admitted execution", () => {
           "unknown",
         );
       }).pipe(Effect.scoped, Effect.provide(receiptsLayer)),
+  );
+
+  it.effect("status carries the provider's usage-limit refusal only when there is one", () =>
+    Effect.gen(function* () {
+      const intent = yield* physicalIntent;
+      const store = yield* Receipts.ExecutionReceipts;
+      yield* store.admit(intent, "generation-0");
+      const limit = {
+        message: "You've hit your usage limit. Try again at 10:44 PM.",
+        resetAt: null,
+      };
+      const status = Effect.fn("ExecutionControlTest.status")(function* (
+        usageLimit: ManagedUsageLimit | undefined,
+      ) {
+        const managed = ManagedExecutionProvider.of({
+          mode: "managed-cli-subscription",
+          available: true,
+          supports: () => true,
+          create: () => Effect.fail(new ExecutionControlError({ code: "mustNotCreate" })),
+          observation: () => undefined,
+          answer: () => undefined,
+          usageLimit: (commandID) => (commandID === intent.commandID ? usageLimit : undefined),
+        });
+        const control = yield* makeExecutionControl(syntheticBinding).pipe(
+          Effect.provideService(ManagedExecutionProvider, managed),
+        );
+        return yield* control.handle(
+          syntheticRequest("execution.status", {
+            commandID: intent.commandID,
+            envelopeDigest: executionEnvelope(intent).digest,
+          }),
+        );
+      });
+      assert.deepPropertyVal(yield* status(limit), "usageLimit", limit);
+      assert.notProperty(yield* status(undefined), "usageLimit");
+    }).pipe(Effect.scoped, Effect.provide(receiptsLayer)),
   );
 
   it.effect("a run admitted by this T3 launch cannot be reconciled", () =>

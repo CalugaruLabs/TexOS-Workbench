@@ -110,8 +110,15 @@ export class ManagedExecutionProvider extends Context.Service<
     readonly observation: (commandID: string) => ManagedExecutionObservation | undefined;
     /** The answer so far of a run still in this process; a finished run's lives on its receipt. */
     readonly answer: (commandID: string) => string | undefined;
+    /** Set when the provider refused the run's turn for the plan's usage limit (this process only). */
+    readonly usageLimit: (commandID: string) => ManagedUsageLimit | undefined;
   }
 >()("t3/nativeTexos/executionManaged/ManagedExecutionProvider") {}
+
+export interface ManagedUsageLimit {
+  readonly message: string;
+  readonly resetAt: string | null;
+}
 
 const sha256OfFile = async (handle: NodeFSP.FileHandle) => {
   const hash = NodeCrypto.createHash("sha256");
@@ -188,6 +195,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
   });
   const observations = new Map<string, ManagedExecutionObservation>();
   const answers = new Map<string, Receipts.ExecutionAnswer>();
+  const usageLimits = new Map<string, ManagedUsageLimit>();
   const checkExecutableFile = makeExecutableCheck();
   const supports = (provider: "codex" | "claudeCode") =>
     bindings.available &&
@@ -199,6 +207,7 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
     supports,
     observation: (id) => observations.get(id),
     answer: (id) => answers.get(id)?.text,
+    usageLimit: (id) => usageLimits.get(id),
     create: Effect.fn("ManagedExecutionProvider.create")(
       function* (receipt, beforeProviderStart, recordMappings) {
         if (!supports(receipt.intent.configuration.provider))
@@ -742,6 +751,11 @@ export const makeManagedExecutionProvider = Effect.fn("ManagedExecutionProvider.
                   if (!providerTurnID || event.providerTurnId !== providerTurnID)
                     return yield* new ExecutionControlError({
                       code: "managedTerminalIdentityMismatch",
+                    });
+                  if (event.status === "failed" && event.failure.class === "usage_limit")
+                    usageLimits.set(intent.commandID, {
+                      message: event.failure.message,
+                      resetAt: event.failure.resetAt ?? null,
                     });
                   publish({
                     outcome: event.status === "cancelled" ? "interrupted" : event.status,

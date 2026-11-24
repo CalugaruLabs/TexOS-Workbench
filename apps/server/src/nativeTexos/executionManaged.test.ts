@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Disposable Git repositories and injected transports only.
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -11,6 +12,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { texosMissionThreadId } from "@t3tools/shared/texosMission";
 import * as CodexClient from "effect-codex-app-server/client";
@@ -57,6 +59,7 @@ import {
   MANAGED_CODEX_DISABLED_FEATURES,
   managedCodexLaunchArgs,
 } from "./executionCodexProfile.ts";
+import { MANAGED_CODEX_MODEL_CATALOG } from "./executionCodexModelCatalog.ts";
 import {
   syntheticCodexRestrictions,
   syntheticBinding,
@@ -138,9 +141,10 @@ const result: SDKMessage = {
 };
 
 /** The effective configuration a managed Codex launch reports through `config/read`. */
-function managedConfiguration(model: string) {
+function managedConfiguration(model: string, modelCatalogPath: string) {
   return {
     model,
+    model_catalog_json: modelCatalogPath,
     model_provider: "openai",
     forced_login_method: "chatgpt",
     cli_auth_credentials_store: "file",
@@ -255,6 +259,7 @@ const codexRefusals: Record<keyof typeof codexRequests, object> = {
 
 function codexTranscript(
   intent: ExecutionIntent,
+  modelCatalogPath: string,
   fault?: CodexFault,
 ): CodexReplay.CodexAppServerReplayTranscript {
   return {
@@ -301,7 +306,7 @@ function codexTranscript(
               frame: remoteControlStatus(fault === "remoteControlOn" ? "connecting" : "disabled"),
             },
           ] as const)),
-      ...managedProfileCheck(intent, 2, fault),
+      ...managedProfileCheck(intent, 2, modelCatalogPath, fault),
       ...(refusedBeforeThread(fault)
         ? []
         : ([
@@ -360,7 +365,7 @@ function codexTranscript(
                 },
               },
             },
-            ...managedProfileCheck(intent, 5),
+            ...managedProfileCheck(intent, 5, modelCatalogPath),
             ...codexTurn(intent, fault),
           ] as const)),
     ],
@@ -371,6 +376,7 @@ function codexTranscript(
 function managedProfileCheck(
   intent: ExecutionIntent,
   id: number,
+  modelCatalogPath: string,
   fault?: CodexFault,
 ): CodexReplay.CodexAppServerReplayTranscript["entries"] {
   return [
@@ -388,11 +394,12 @@ function managedProfileCheck(
         id,
         result: {
           config: {
-            ...managedConfiguration(intent.configuration.modelID),
+            ...managedConfiguration(intent.configuration.modelID, modelCatalogPath),
             ...(fault === "configuration"
               ? {
                   features: {
-                    ...managedConfiguration(intent.configuration.modelID).features,
+                    ...managedConfiguration(intent.configuration.modelID, modelCatalogPath)
+                      .features,
                     shell_tool: true,
                   },
                 }
@@ -555,7 +562,7 @@ const setup = Effect.fn("ManagedExecutionTest.setup")(function* (
     configuration: {
       ...original.configuration,
       provider,
-      modelID: provider === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
+      modelID: provider === "codex" ? "gpt-5.6-sol" : "claude-sonnet-4-6",
     },
     worktree: { ...original.worktree, device: String(stat.dev), inode: String(stat.ino) },
   };
@@ -565,6 +572,7 @@ const setup = Effect.fn("ManagedExecutionTest.setup")(function* (
   let opens = 0;
   let edits = 0;
   let joins = 0;
+  const modelCatalogs: Array<string> = [];
   const source: PrivateNativeBindingSource = {
     readRetained: (key) =>
       Effect.gen(function* () {
@@ -640,15 +648,40 @@ const setup = Effect.fn("ManagedExecutionTest.setup")(function* (
           assert.equal(input.settings.setupMode, "existing");
           assert.equal(input.settings.homePath, profileDirectory);
           assert.equal(input.settings.binaryPath, NodePath.join(root, "not-an-executable"));
+          // The run's own catalog copy, in a private folder under T3's state.
+          const modelCatalog = tokenizeCliArgs(input.settings.launchArgs ?? "")
+            .find((token) => token.startsWith("model_catalog_json="))
+            ?.slice("model_catalog_json=".length)
+            .replace(/^"|"$/g, "");
+          assert.isString(modelCatalog);
+          modelCatalogs.push(modelCatalog!);
           assert.equal(
             input.settings.launchArgs,
-            managedCodexLaunchArgs(intent.configuration.modelID, syntheticCodexRestrictions),
+            managedCodexLaunchArgs(
+              intent.configuration.modelID,
+              syntheticCodexRestrictions,
+              modelCatalog!,
+            ),
+          );
+          assert.equal(
+            NodePath.dirname(NodePath.dirname(modelCatalog!)),
+            NodeFS.realpathSync(config.stateDir),
+          );
+          assert.equal(yield* fs.readFileString(modelCatalog!), MANAGED_CODEX_MODEL_CATALOG);
+          assert.equal((NodeFS.statSync(modelCatalog!).mode & 0o777).toString(8), "400");
+          assert.equal(
+            (NodeFS.statSync(NodePath.dirname(modelCatalog!)).mode & 0o777).toString(8),
+            "700",
           );
           assert.deepEqual(input.environment, {
             HOME: homeDirectory,
             CODEX_HOME: profileDirectory,
           });
-          const transcript = codexTranscript(intent, isCodexFault(fault) ? fault : undefined);
+          const transcript = codexTranscript(
+            intent,
+            modelCatalog!,
+            isCodexFault(fault) ? fault : undefined,
+          );
           const driver = yield* CodexReplay.makeReplayDriver(transcript, {
             beforeEmitInbound: (entry) =>
               entry.label === "edit" ? edit().pipe(Effect.orDie) : Effect.void,
@@ -800,6 +833,7 @@ const setup = Effect.fn("ManagedExecutionTest.setup")(function* (
     edited,
     mappedTurn,
     counts: () => ({ reads, access, opens, edits, joins }),
+    modelCatalogs,
     readAnswer: fs.readFileString(answer),
     stored: store.get(intent.commandID, executionEnvelope(intent).digest, intent.scope.authorityID),
   };
@@ -904,6 +938,12 @@ describe("control through private binding and actual managed lower adapters", ()
         assert.equal(yield* f.readAnswer, "export const answer = 42;\n");
         assert.equal(f.counts().edits, 1);
         assert.equal(f.counts().opens, 1);
+        assert.lengthOf(f.modelCatalogs, provider === "codex" ? 1 : 0);
+        for (const catalog of f.modelCatalogs)
+          assert.isFalse(
+            NodeFS.existsSync(NodePath.dirname(catalog)),
+            "the run removes its catalog",
+          );
         assert.lengthOf(f.outcomes, 1, "the actual wrapper must return, not fail into uncertainty");
         // Codex runs owned and proves its event prefix; Claude is not owned yet and stays unproven.
         const proven = provider === "codex";

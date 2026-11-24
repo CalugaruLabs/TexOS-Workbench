@@ -7,10 +7,10 @@ import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import type { ManagedCodexRestrictions } from "./executionBinding.ts";
 
 /**
- * The managed Codex profile mirrors TexOS's interim route (`CodexRestrictedStdioProfile` and
- * `CodexChatBridge.disabledFeatures`) except that a Mission may write inside its own folder.
- * The shell stays off: Codex starts each command in a new session, so a stopped run could
- * leave one running that no process-group check sees.
+ * The managed Codex profile mirrors TexOS's interim route (`CodexRestrictedStdioProfile`, its
+ * pinned model catalog and `CodexChatBridge.disabledFeatures`) except that a Mission may write
+ * inside its own folder. The shell stays off: Codex starts each command in a new session, so a
+ * stopped run could leave one running that no process-group check sees.
  */
 export const MANAGED_CODEX_DISABLED_FEATURES = [
   "shell_tool",
@@ -81,8 +81,10 @@ type Setting = string | number | boolean | readonly [] | Readonly<Record<string,
 const managedSettings = (
   model: string,
   workspaceID: string,
+  modelCatalogPath: string,
 ): ReadonlyArray<readonly [string, Setting]> => [
   ["model", model],
+  ["model_catalog_json", modelCatalogPath],
   ["model_provider", "openai"],
   ["forced_login_method", "chatgpt"],
   ["cli_auth_credentials_store", "file"],
@@ -151,7 +153,6 @@ const UNSET_SETTINGS = [
   "mcp_oauth_callback_port",
   "mcp_oauth_callback_url",
   "memories",
-  "model_catalog_json",
   "model_instructions_file",
   "notice",
   "openai_base_url",
@@ -169,6 +170,8 @@ const UNSET_SETTINGS = [
 
 const WORKSPACE_ID = /^[A-Za-z0-9_-]{1,256}$/;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// Goes into a quoted TOML string and a quoted launch token, so no quote, backslash or control.
+const CATALOG_PATH = /^\/[^"'\\\u0000-\u001f\u007f]{0,1023}$/;
 const MAXIMUM_INSTRUCTION_FILE_BYTES = 1024 * 1024;
 
 const toml = (value: Setting): string =>
@@ -189,15 +192,22 @@ class ManagedCodexProfileError extends Error {
 }
 
 /** The launch arguments, as T3's settings string, that start Codex in the managed profile. */
-export function managedCodexLaunchArgs(model: string, restrictions: ManagedCodexRestrictions) {
-  if (!MODEL_ID.test(model) || !WORKSPACE_ID.test(restrictions.chatgptWorkspaceID))
+export function managedCodexLaunchArgs(
+  model: string,
+  restrictions: ManagedCodexRestrictions,
+  modelCatalogPath: string,
+) {
+  if (
+    !MODEL_ID.test(model) ||
+    !WORKSPACE_ID.test(restrictions.chatgptWorkspaceID) ||
+    !CATALOG_PATH.test(modelCatalogPath)
+  )
     throw new ManagedCodexProfileError("invalidProfileValue");
   const argv = [
     "--strict-config",
-    ...managedSettings(model, restrictions.chatgptWorkspaceID).flatMap(([key, value]) => [
-      "--config",
-      `${key}=${toml(value)}`,
-    ]),
+    ...managedSettings(model, restrictions.chatgptWorkspaceID, modelCatalogPath).flatMap(
+      ([key, value]) => ["--config", `${key}=${toml(value)}`],
+    ),
     ...MANAGED_CODEX_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
   ];
   // Every token is quoted whole, and the values above hold no single quote.
@@ -261,10 +271,15 @@ export function checkManagedCodexConfiguration(
   response: unknown,
   model: string,
   restrictions: ManagedCodexRestrictions,
+  modelCatalogPath: string,
 ) {
   const config = record(record(response)?.config);
   if (!config) throw new ManagedCodexProfileError("configurationUnreadable");
-  for (const [key, expected] of managedSettings(model, restrictions.chatgptWorkspaceID)) {
+  for (const [key, expected] of managedSettings(
+    model,
+    restrictions.chatgptWorkspaceID,
+    modelCatalogPath,
+  )) {
     const actual = at(config, key);
     if (actual === undefined && UNREPORTED_SETTINGS.has(key)) continue;
     const matches =

@@ -190,12 +190,14 @@ const CODEX_FAULTS = [
   "undecodableRequest",
 ] as const;
 type CodexFault = (typeof CODEX_FAULTS)[number];
+// A turn Codex refuses for the plan's usage limit: the run ends, it is not refused.
+type CodexTurnFault = CodexFault | "usageLimit";
 const isCodexFault = (fault: string | undefined): fault is CodexFault =>
   CODEX_FAULTS.some((known) => known === fault);
-const isRequestFault = (fault: CodexFault | undefined): fault is CodexRequestFault =>
+const isRequestFault = (fault: CodexTurnFault | undefined): fault is CodexRequestFault =>
   fault !== undefined && fault in codexRequests;
 // These are refused before the thread starts, so the transcript ends after the profile check.
-const refusedBeforeThread = (fault: CodexFault | undefined) =>
+const refusedBeforeThread = (fault: CodexTurnFault | undefined) =>
   fault === "configuration" || fault === "remoteControlOn" || fault === "remoteControlMissing";
 
 const remoteControlStatus = (status: "disabled" | "connecting") => ({
@@ -260,7 +262,7 @@ const codexRefusals: Record<keyof typeof codexRequests, object> = {
 function codexTranscript(
   intent: ExecutionIntent,
   modelCatalogPath: string,
-  fault?: CodexFault,
+  fault?: CodexTurnFault,
 ): CodexReplay.CodexAppServerReplayTranscript {
   return {
     provider: "codex",
@@ -377,7 +379,7 @@ function managedProfileCheck(
   intent: ExecutionIntent,
   id: number,
   modelCatalogPath: string,
-  fault?: CodexFault,
+  fault?: CodexTurnFault,
 ): CodexReplay.CodexAppServerReplayTranscript["entries"] {
   return [
     {
@@ -423,9 +425,9 @@ function managedProfileCheck(
 
 function codexTurn(
   intent: ExecutionIntent,
-  fault: CodexFault | undefined,
+  fault: CodexTurnFault | undefined,
 ): CodexReplay.CodexAppServerReplayTranscript["entries"] {
-  const turn = (status: "inProgress" | "completed") => ({
+  const turn = (status: "inProgress" | "completed" | "failed") => ({
     id: "controlled-native-turn",
     items: [],
     itemsView: "notLoaded",
@@ -470,43 +472,62 @@ function codexTurn(
           { type: "emit_inbound", frame: { method: "turn/started", params: started } },
           { type: "emit_inbound", frame: remoteControlStatus("connecting") },
         ] as const)
-      : isRequestFault(fault)
+      : fault === "usageLimit"
         ? ([
             { type: "emit_inbound", frame: { method: "turn/started", params: started } },
-            { type: "emit_inbound", frame: { id: 77, ...codexRequests[fault] } },
-            { type: "expect_outbound", frame: { id: 77, error: codexRefusals[fault] } },
-          ] as const)
-        : ([
-            {
-              type: "emit_inbound",
-              label: "edit",
-              frame: { method: "turn/started", params: started },
-            },
-            {
-              type: "emit_inbound",
-              frame: {
-                method: "item/completed",
-                params: {
-                  threadId: "controlled-native-thread",
-                  turnId: "controlled-native-turn",
-                  completedAtMs: 2,
-                  item: { type: "agentMessage", id: "answer-item", text: CODEX_ANSWER },
-                },
-              },
-            },
             {
               type: "emit_inbound",
               frame: {
                 method: "turn/completed",
-                params: { threadId: "controlled-native-thread", turn: turn("completed") },
+                params: {
+                  threadId: "controlled-native-thread",
+                  turn: {
+                    ...turn("failed"),
+                    error: { message: CODEX_USAGE_LIMIT, codexErrorInfo: "usageLimitExceeded" },
+                  },
+                },
               },
             },
             { type: "runtime_exit", status: "success" },
-          ] as const)),
+          ] as const)
+        : isRequestFault(fault)
+          ? ([
+              { type: "emit_inbound", frame: { method: "turn/started", params: started } },
+              { type: "emit_inbound", frame: { id: 77, ...codexRequests[fault] } },
+              { type: "expect_outbound", frame: { id: 77, error: codexRefusals[fault] } },
+            ] as const)
+          : ([
+              {
+                type: "emit_inbound",
+                label: "edit",
+                frame: { method: "turn/started", params: started },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "item/completed",
+                  params: {
+                    threadId: "controlled-native-thread",
+                    turnId: "controlled-native-turn",
+                    completedAtMs: 2,
+                    item: { type: "agentMessage", id: "answer-item", text: CODEX_ANSWER },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "turn/completed",
+                  params: { threadId: "controlled-native-thread", turn: turn("completed") },
+                },
+              },
+              { type: "runtime_exit", status: "success" },
+            ] as const)),
   ];
 }
 
 const CODEX_ANSWER = 'Wrote answer.ts: "42" 😀';
+const CODEX_USAGE_LIMIT = "You've hit your usage limit. Try again at 10:44 PM.";
 
 const database = Layer.mergeAll(
   NodeSqliteClient.layer({ filename: ":memory:" }),
@@ -532,7 +553,7 @@ const setup = Effect.fn("ManagedExecutionTest.setup")(function* (
     | "executable"
     | "stream"
     | "interrupt"
-    | CodexFault,
+    | CodexTurnFault,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const temporary = yield* fs.makeTempDirectoryScoped({ prefix: "texos-managed-" });
@@ -680,7 +701,7 @@ const setup = Effect.fn("ManagedExecutionTest.setup")(function* (
           const transcript = codexTranscript(
             intent,
             modelCatalog!,
-            isCodexFault(fault) ? fault : undefined,
+            isCodexFault(fault) || fault === "usageLimit" ? fault : undefined,
           );
           const driver = yield* CodexReplay.makeReplayDriver(transcript, {
             beforeEmitInbound: (entry) =>
@@ -960,6 +981,7 @@ describe("control through private binding and actual managed lower adapters", ()
         assert.isString(saved?.mappings.providerTurnID);
         const observation = f.managed.observation(f.intent.commandID);
         assert.equal(observation?.outcome, "completed");
+        assert.isUndefined(f.managed.usageLimit(f.intent.commandID));
         assert.equal(observation?.closeAndJoin, "observed");
         assert.equal(observation?.transportAndParserDrain, "observed");
         assert.equal(observation?.adapterEventDrain, proven ? "observed" : "unknown");
@@ -1033,6 +1055,22 @@ describe("control through private binding and actual managed lower adapters", ()
         Effect.provide(layers),
       );
     },
+  );
+
+  it.effect("a Codex usage-limit refusal ends the run and is kept for status", () =>
+    Effect.gen(function* () {
+      const f = yield* setup("codex", "usageLimit");
+      const control = yield* makeExecutionControl(syntheticBinding).pipe(
+        Effect.provideService(ManagedExecutionProvider, f.managed),
+      );
+      yield* control.handle(syntheticRequest("execution.admit", f.intent), f.authorize);
+      yield* control.awaitAttempt(f.intent.commandID);
+      assert.equal((yield* f.stored)?.finish?.outcome, "failed");
+      assert.deepEqual(f.managed.usageLimit(f.intent.commandID), {
+        message: CODEX_USAGE_LIMIT,
+        resetAt: null,
+      });
+    }).pipe(Effect.scoped, Effect.provide(layers)),
   );
 
   it.effect.each(["close", "parser", "ignored-sdk-close"] as const)(

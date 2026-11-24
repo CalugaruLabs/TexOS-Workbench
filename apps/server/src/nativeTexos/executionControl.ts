@@ -25,7 +25,7 @@ import * as DateTime from "effect/DateTime";
 import { EnvironmentAuth } from "../auth/EnvironmentAuth.ts";
 import * as Receipts from "./executionReceipts.ts";
 import { validateExecutionWorktree } from "./executionWorktree.ts";
-import { ManagedExecutionProvider } from "./executionManaged.ts";
+import { ManagedExecutionProvider, type ManagedUsageLimit } from "./executionManaged.ts";
 
 export class ExecutionControlError extends Schema.TaggedError<ExecutionControlError>()(
   "ExecutionControlError",
@@ -94,7 +94,10 @@ const stoppedBeforeStart: Receipts.ExecutionFinish = {
 type ReceiptView = ReturnType<typeof executionReceiptView>;
 export type ExecutionControlResult =
   | ReceiptView
-  | (ReceiptView & { readonly answer: ReturnType<typeof answerPage> })
+  | (ReceiptView & {
+      readonly answer: ReturnType<typeof answerPage>;
+      readonly usageLimit?: ManagedUsageLimit;
+    })
   | { readonly capabilities: readonly string[]; readonly runtimeID?: string }
   | { readonly credential: string; readonly expiresAtMs: number }
   | {
@@ -414,8 +417,13 @@ export const makeExecutionControl = Effect.fn("ExecutionControl.make")(function*
               ? provider.answer(saved.intent.commandID)
               : undefined) ??
             "";
+          const usageLimit =
+            provider?.mode === "managed-cli-subscription"
+              ? provider.usageLimit(saved.intent.commandID)
+              : undefined;
           return {
             ...executionReceiptView(saved),
+            ...(usageLimit ? { usageLimit } : {}),
             answer: answerPage(
               text,
               request.params.textOffset ?? 0,
